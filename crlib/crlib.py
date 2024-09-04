@@ -4,21 +4,30 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import os
 import datetime
+import yaml
 from datetime import timedelta
 
 ## Data Hangling
 
 def read_params(path):
     '''
-    Reads the project parameters from yaml file.
+    Reads the project parameters from txt, csv, or yaml file.
+
+    Returns:
+        A dictionary.
     '''
+    par = None
     if os.path.exists(path):
-        par = pd.read_csv(path)
-        par = {k: par[k][0] for k in par.columns}
-        if 'sample_interval' in par:
-            par['sample_interval'] = int(par['sample_interval'])
-        return par
-    return None
+        ext = path.split('.')[-1]
+        if ext in ['txt', 'csv']:
+            par = pd.read_csv(path)
+            par = {k: par[k][0] for k in par.columns}
+            if 'sample_interval' in par:
+                par['sample_interval'] = int(par['sample_interval'])
+        elif ext == 'yaml':
+            with open(path) as f:
+                par = yaml.safe_load(f)
+    return par
 
 def get_universe():
     '''
@@ -58,31 +67,31 @@ def read_data(datatype, dt, data_dir, locale, columns=None, product=None):
     df = pd.read_parquet(path, columns=readcols)
 
     if product is None:
-        df['date'] = pd.to_datetime(df.t0, unit='us')
+        df['date'] = pd.to_datetime(df.ts, unit='us')
         df = df.set_index(product_cols)
     else:
         df = df[(df.exchange==product[0])&(df.symbol==product[1])]
-        df['date'] = pd.to_datetime(df.t0, unit='us')
+        df['date'] = pd.to_datetime(df.ts, unit='us')
         df = df.set_index('date').sort_index()
     df = df.drop(columns=[x for x in df.columns if columns is not None and x not in columns])
 
     return df
 
-def read_trade(dt, data_dir, locale, columns=['price', 'abs_qty', 'net_qty', 't0'], product=None):
+def read_trade(dt, data_dir, locale, columns=['price', 'abs_qty', 'net_qty', 'ts'], product=None):
     '''
     Reads the trade data for the time dt.
     '''
     df = read_data('trade', dt, data_dir, locale, columns, product)
     return df
 
-def read_bbo(dt, data_dir, locale, columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 't0'], product=None):
+def read_bbo(dt, data_dir, locale, columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 'ts'], product=None):
     '''
     Reads the bbo data for the time dt.
     '''
     df = read_data('bbo', dt, data_dir, locale, columns, product)
     return df
 
-def read_midpx(dt, data_dir, locale, columns=['mid_px', 'adj_width', 'adj_mid_px', 't0'], product=None):
+def read_midpx(dt, data_dir, locale, columns=['mid_px', 'adj_width', 'adj_mid_px', 'ts'], product=None):
     '''
     Reads the midpx data for the time dt.
     '''
@@ -159,7 +168,7 @@ def steps(df):
     return pd.concat([shifted, df]).reset_index().rename_axis(tmp_index_name).sort_values(
         by=[index_name, tmp_index_name]).set_index(index_name)
 
-def plot_bidask_ts(dft, dfb, dfmid, ifrom='2024-08-15 02:10:16', ito='2024-08-15 02:10:26',
+def plot_bidask(dft, dfb, dfmid, ifrom='2024-08-15 02:10:16', ito='2024-08-15 02:10:26',
                    adj=False, plot_trade=True):
     '''
     Plots the price series of bbo, trade, and midpx data.
@@ -187,27 +196,44 @@ def plot_bidask_ts(dft, dfb, dfmid, ifrom='2024-08-15 02:10:16', ito='2024-08-15
 
 ## Features
 
-def features_future_returns(df, rangemax=10):
+def future_returns(prc, i):
+    r = None
+    if prc is not None and len(prc) > i:
+        r = (prc.shift(-2**(i-1)) / prc - 1).fillna(0).replace([np.inf, -np.inf], 0)
+    return r
+
+def past_returns(prc, i):
+    r = None
+    if prc is not None and len(prc) > i:
+        r = (prc / prc.shift(2**(i-1)) - 1).fillna(0).replace([np.inf, -np.inf], 0)
+    return r
+
+def get_returns(df, rangemax, varname, returns_func):
     '''
     Calculates the future returns.
     '''
-    serlist = []
+    serdict = {}
     for i in range(1, rangemax):
-        ser = (df.mid.shift(-2**(i-1)) / df.mid - 1).fillna(0).replace([np.inf, -np.inf], 0)
-        ser.name = f'tar_{i}'
-        serlist.append(ser)
+        ser = returns_func(df.mid, i)
+        ser.name = f'{varname}_{i}'
+        serdict[ser.name] = ser
+
+    for i in range(1, rangemax):
+        for j in range(i+1, rangemax):
+            name1 = f'{varname}_{i}'
+            name2 = f'{varname}_{j}'
+            ser = serdict[name2] - serdict[name1]
+            ser.name = f'diff_{varname}_{i}_{j}'
+            serdict[ser.name] = ser
+
+    serlist = list(serdict.values())
     return serlist
 
-def features_past_returns(df, rangemax):
-    '''
-    Calculates the past returns.
-    '''
-    serlist = []
-    for i in range(1, rangemax+1):
-        ser = (df.mid / df.mid.shift(2**(i-1)) - 1).fillna(0).replace([np.inf, -np.inf], 0)
-        ser.name = f'ret_{i}'
-        serlist.append(ser)
-    return serlist
+def features_future_returns(df, rangemax=10):
+    return get_returns(df, rangemax, 'ret', returns_func=future_returns)
+
+def features_past_returns(df, rangemax=10):
+    return get_returns(df, rangemax, 'tar', returns_func=past_returns)
 
 def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmrangemax=8, max_tsince_trade=5, mid_col='price', verbose=False):
     '''
@@ -217,7 +243,7 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
         A dataframe.
     '''
 
-    tgrp = pd.to_datetime(dft.t0 // sample_interval * sample_interval, unit='us')
+    tgrp = pd.to_datetime(dft.ts // sample_interval * sample_interval, unit='us')
     dfts = dft.groupby(tgrp).agg(
         price=('price', 'last'),
         avg_price=('price', 'mean'),
@@ -232,7 +258,7 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
 
     dfb['qimb'] = ((dfb.askqty - dfb.bidqty) / (dfb.askqty + dfb.bidqty)).fillna(0).replace([np.inf, -np.inf], 0)
 
-    bgrp = pd.to_datetime(dfb.t0 // sample_interval * sample_interval, unit='us')
+    bgrp = pd.to_datetime(dfb.ts // sample_interval * sample_interval, unit='us')
     dfbs = dfb.groupby(bgrp).agg(
         qimb=('qimb', 'last'),
         adj_askpx=('adj_askpx', 'last'),
@@ -242,7 +268,7 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
         # med_spreadbp=('spreadbp', 'median'),
     )
 
-    mgrp = pd.to_datetime(dfm.t0 // sample_interval * sample_interval, unit='us')
+    mgrp = pd.to_datetime(dfm.ts // sample_interval * sample_interval, unit='us')
     dfms = dfm.groupby(mgrp).agg(
         adj_width=('adj_width', 'last'),
         adj_mid_px=('adj_mid_px', 'last'),
@@ -397,18 +423,26 @@ def read_features(dt1, dt2, feature_dir):
         df = pd.read_parquet(path)
         if df is not None and df.shape[0] > 0:
             dflist.append(df)
-    df = pd.concat(dflist)
-    return df
+    if len(dflist) > 0:
+        df = pd.concat(dflist)
+        return df
+    return None
 
 ## Fitting
 
-def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=None):
+def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
     Select feaures recursively using validation sample.
 
     Returns:
         Series of selected features and the regression coefficients.
     '''
+    selected_features = []
+    best_b = None
+    if (dft is None or dfv is None or dft.loc[dft.valid].shape[0] < min_data_cnt
+        or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
+        return selected_features, best_b
+    
     allfeatures = [x for x in dft.columns if x.startswith('ret_') or x.startswith('medqimb_')
                 or x.startswith('qimax_') or x.startswith('hilo')]
     if not debug_nfeature is None:
@@ -416,51 +450,36 @@ def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=
 
     print(f'Total {len(allfeatures)} features: {allfeatures}')
 
-    selected_features = []
     remaining_features = allfeatures.copy()
 
     best_r2 = 0
-    thres = 1.01
-    best_b = None
+    thres = 1.01    
     while True:
         new_r2 = 0
         new_b = None
         new_feature = None
         for feature in remaining_features:
-            # Prepare for fitting
-            fit_features = selected_features + [feature]
-            X = dft.loc[dft.valid, fit_features].copy()
-            y = dft.loc[dft.valid, target_name]
-            X['const'] = 1
-
             # Fit
-            try:
-                b = (np.linalg.inv(X.T @ X) @ X.T @ y).array
-            except:
-                print('Failed: ', feature)
-                if verbose:
-                    print(dft.shape, X.shape, y.shape)
-                    print(dft.columns.tolist())
-                    print(dft.valid.sum())
-                    print(fit_features)
+            fit_features = selected_features + [feature]
+            b = linreg(target_name, dft, fit_features, verbose)
+            if b is None:
                 continue
+            else:
+                # Validation
+                Xv = dfv.loc[dfv.valid, fit_features].copy()
+                yv = dfv.loc[dfv.valid, target_name]
+                Xv['const'] = 1
+                yhatv = Xv @ b
+                r2 = 1 - np.var(yv - yhatv) / np.var(yv)
 
-            # Validation
-            Xv = dfv.loc[dfv.valid, fit_features].copy()
-            yv = dfv.loc[dfv.valid, target_name]
-            Xv['const'] = 1
+                # Check if new best is found
+                if r2 > new_r2 and r2 > best_r2*thres:
+                    new_r2 = r2
+                    new_b = b
+                    new_feature = feature
 
-            yhatv = Xv @ b
-            r2 = 1 - np.var(yv - yhatv) / np.var(yv)
-
-            # Check if new best is found
-            if r2 > new_r2 and r2 > best_r2*thres:
-                new_r2 = r2
-                new_b = b
-                new_feature = feature
-
-            if verbose:
-                print(f'{fit_features} r2 {r2:.4f} new_r2 {new_r2:.4f}')
+                if verbose:
+                    print(f'{fit_features} r2 {r2:.4f} old_best {best_r2} new_best {new_r2:.4f}')
 
         if new_feature is None:
             break
@@ -511,11 +530,12 @@ def train_linear(target_name, dtt, dtv, dto, feature_dir,
     dfv = read_features(dtv, dto, feature_dir)
     selected_features = None
     best_b = None
-    if features is None:
+    if features is None: # select features with validation data.
         selected_features, best_b = select_features_linear(target_name, dft, dfv, verbose, debug_nfeature)
     else:
-        selected_features = features
-        best_b = linreg(target_name, dft, features, verbose)
+        if dfv.shape[0] > 0: # feature set is fixed.
+            selected_features = features
+            best_b = linreg(target_name, dft, features, verbose)
     return selected_features, best_b
 
 def get_dts(st, fit_window, val_window, oos_window):
@@ -534,32 +554,37 @@ def get_dts(st, fit_window, val_window, oos_window):
 def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, features=None, debug_nfeature=None):
     '''
     Performs fitting with the specified train, validate, and out-of-sample dates.
-    
+
     Returns:
         Series of predictions.
     '''
     selected_features, best_b = train_linear(target_name, dtt, dtv, dto, feature_dir,
                                              features, verbose=False, debug_nfeature=debug_nfeature)
-    dfo = read_features(dto, dte, feature_dir)
-    Xo = dfo[selected_features].copy()
-    Xo['const'] = 1
-    yo = dfo[target_name]
-    pred = Xo @ best_b
-
-    dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name] + selected_features]
-    dfo['pred'] = pred
-
-    return dfo
+    if best_b is not None:
+        dfo = read_features(dto, dte, feature_dir)
+        if dfo is not None and dfo.shape[0] > 0:
+            Xo = dfo[selected_features].copy()
+            Xo['const'] = 1
+            yo = dfo[target_name]
+            pred = Xo @ best_b
+        
+            dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name] + selected_features]
+            dfo['pred'] = pred
+        
+            return dfo
+    return None
 
 def pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, features=None, debug_nfeature=None):
     dfo = oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, features, debug_nfeature)
-    return dfo['pred']
+    if dfo is not None and dfo.shape[0] > 0 and 'pred' in dfo.columns:
+        return dfo['pred']
+    return None
 
 def rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
                     features=None, debug_nfeature=None):
     '''
     Performs fitting with rolling window between st and et.
-    
+
     Returns:
         Out of sample prediction.
     '''
@@ -569,36 +594,41 @@ def rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window
     while(dte <= et):
         print(dtt, dtv, dto, dte)
         pred = pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, features, debug_nfeature)
-        pred_list.append(pred)
+        if pred is not None:
+            pred_list.append(pred)
 
         dtt = dtt + timedelta(hours=oos_window)
         dtv, dto, dte = get_dts(dtt, fit_window, val_window, oos_window)
-    allpred = pd.concat(pred_list)
-    return allpred
+    if len(pred_list) > 0:
+        allpred = pd.concat(pred_list)
+        return allpred
+    return None
 
 def rolling_oos_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
               fitdesc='', features=None, debug_nfeature=None):
     '''
     Performs fitting with rolling window between st and et.
-    
+
     Returns:
         Out of sample test result with prediction.
     '''
     oospred = rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
                              features, debug_nfeature)
     dfo = read_features(st + timedelta(hours=fit_window+val_window), et, feature_dir)
-    dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name]]
-    dfo['pred'] = oospred
-    oosdir = f'{feature_dir}/fit/{target_name}'
-    if not os.path.exists(oosdir):
-        os.makedirs(oosdir)
-    _fitdesc = fitdesc if len(fitdesc) == 0 else '_'+fitdesc
-    path = f'{oosdir}/oos{_fitdesc}_{get_idate(dfo.index[0])}_{get_idate(dfo.index[-1])}.parquet'
-    dfo.to_parquet(path)
-    print(f'oos pred written to {path}')
-    return dfo
+    if dfo is not None and dfo.shape[0] > 0:
+        dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name]]
+        dfo['pred'] = oospred
+        oosdir = f'{feature_dir}/fit/{target_name}'
+        if not os.path.exists(oosdir):
+            os.makedirs(oosdir)
+        _fitdesc = fitdesc if len(fitdesc) == 0 else '_'+fitdesc
+        path = f'{oosdir}/oos{_fitdesc}_{get_idate(dfo.index[0])}_{get_idate(dfo.index[-1])}.parquet'
+        dfo.to_parquet(path)
+        print(f'oos pred written to {path}')
+        return dfo
+    return None
 
-def plot_target_prediction(dfo, target_name, savefig=False, fitdesc=''):
+def plot_target_prediction(dfo, target_name):
     '''
     Plots target vs prediciton in 100 prediction quantiles.
     '''
@@ -613,11 +643,8 @@ def plot_target_prediction(dfo, target_name, savefig=False, fitdesc=''):
     plt.ylabel('target')
     plt.grid()
     plt.legend()
-    if savefig:
-        _fitdesc = fitdesc if fitdesc == '' else '_'+fitdesc
-        plt.savefig(f'target_prediction_100bins{_fitdesc}.png')
 
-def plot_target_prediction_errorbar(dfo, target_name, savefig=False, fitdesc=''):
+def plot_target_prediction_errorbar(dfo, target_name):
     '''
     Plots target vs prediction in 13 quantiles of varying sizes.
     '''
@@ -630,15 +657,14 @@ def plot_target_prediction_errorbar(dfo, target_name, savefig=False, fitdesc='')
     plt.xlabel('prediction')
     plt.ylabel('target')
     plt.grid()
-    if savefig:
-        _fitdesc = fitdesc if fitdesc == '' else '_'+fitdesc
-        plt.savefig(f'target_prediction_errorbar{_fitdesc}.png')
+    plt.tight_layout()
 
 ## Trade
 
 def get_pnl(dfo, target_name, feebp):
     '''
-    Calculates pnl from prediction following simple rules. Vecorized for speed.
+    Calculates pnl from prediction following simple rules. Vectorized for speed.
+    Any change to this function should be rigorously tested.
 
     Returns:
         Series of pnl and position.
@@ -666,6 +692,24 @@ def get_pnl(dfo, target_name, feebp):
     position.name = (feebp, 'pos')
     return pnl, position
 
+def get_aggpnl(pnl):
+    '''
+    Downsamples the pnl series.
+
+    Returns:
+        A pnl series.
+    '''
+    aggpnl = None
+    time_range = pnl.index[-1] - pnl.index[0]
+    if time_range > timedelta(days=100):
+        aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(hour=0, minute=0, second=0, microsecond=0))).sum()
+    elif time_range > timedelta(hours=100):
+        aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(minute=0, second=0, microsecond=0))).sum()
+    else:
+        aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(second=0, microsecond=0))).sum()
+
+    return aggpnl
+    
 def get_pnls(dfo, target_name, feebp_list):
     '''
     Calculates multiple pnl series using the trading fees passed from the caller.
@@ -675,39 +719,34 @@ def get_pnls(dfo, target_name, feebp_list):
         the trading fee in basis points. The second level is ('pnl', 'position').
     '''
     cols = []
+    aggcols = []
     for feebp in feebp_list:
         pnl, pos = get_pnl(dfo, target_name, feebp)
         cols.append(pnl)
         cols.append(pos)
-    df = pd.concat(cols, axis=1)
-    return df
 
-def get_pnl_ser(pnl):
+        aggpnl = get_aggpnl(pnl)
+        aggcols.append(aggpnl)
+    df = pd.concat(cols, axis=1)
+    dfagg = pd.concat(aggcols, axis=1)
+    return df, dfagg
+
+def get_daily_sharpe(pnl):
     '''
-    Downscales the pnl series.
+    Calculates daily sharpe from pnl series of arbitrary time interval.
+    If the input interval is too small, aggregate the series before calculating the sharpe.
 
     Returns:
-        A pnl series and the sharpe ratio.
+        A sharpe ratio.
     '''
-    pnlser = None
-    time_range = pnl.index[-1] - pnl.index[0]
-    if time_range > timedelta(days=100):
-        pnlser = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(hour=0, minute=0, second=0, microsecond=0))).sum()
-        shfac = 365**.5
-    elif time_range > timedelta(hours=100):
-        pnlser = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(minute=0, second=0, microsecond=0))).sum()
-        shfac = (365*24)**.5
-    else:
-        pnlser = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(second=0, microsecond=0))).sum()
-        shfac = (365*24*60)**.5
-
-    sharpe = 0
-    if pnlser is not None:
-        pnlstd = pnlser.std()
-        if pnlstd > 0:
-            sharpe = pnlser.mean() / pnlstd * shfac
-
-    return pnlser, sharpe
+    d_shrp = 0
+    aggpnl = get_aggpnl(pnl)
+    pnlstd = aggpnl.std()
+    if pnlstd > 0:
+        dfac = (timedelta(days=1).total_seconds() / (aggpnl.index[1]-aggpnl.index[0]).total_seconds())**.5
+        pnlmean = aggpnl.mean()
+        d_shrp = pnlmean / pnlstd * dfac
+    return d_shrp
 
 def plot_pnl(dfpnl):
     '''
@@ -715,48 +754,55 @@ def plot_pnl(dfpnl):
     '''
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
-        pnl, sharpe = get_pnl_ser(dfpnl[feebp]['pnl'])
-        plt.plot(pnl.cumsum(), label=f'fee={feebp}bp, sharpe={sharpe:.1f}')
+        pnl = dfpnl[feebp]['pnl']
+        # d_shrp = get_daily_sharpe(pnl)
+        plt.plot(pnl.cumsum(), label=f'fee={feebp}bp')
     plt.title('cumulative pnl')
-    plt.ylabel('sharpe')
+    plt.ylabel('pnl')
     plt.xticks(rotation=20)
     plt.grid()
     plt.legend()
 
-def get_trade_summary(dfpnl):
+def get_trade_summary(dfpnl, dfo=None, target_name=None):
     '''
     Calculate stats of the trading.
 
     Returns:
         A dataframe.
     '''
+    biaspct = None # A measure of overfitting. Indpendent of trading cost.
+    if dfo is not None and target_name in dfo.columns:
+        predlim = dfo.pred.quantile([0.01, 0.99])
+        dftopbot = dfo[(dfo.pred < predlim.iloc[0]) | (dfo.pred > predlim.iloc[1])]
+        biaspct = ((dftopbot.pred - dftopbot[target_name]) * np.sign(dftopbot.pred)).mean() / dftopbot.pred.abs().mean()
+
     trds_list = []
-    # for fee, pos, pnl in zip(fee_bp_list, pos_list, pnl_list):
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
         pos = dfpnl[feebp]['pos']
         pnl = dfpnl[feebp]['pnl']
-        
+
         ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
-        
+
         n_data_points = pos.shape[0] # number of data points
         n_nan = pos[pos.isna()].shape[0] # Nan's in pos
         n_nopos = pos[pos==0].shape[0] # no position
-        
+
         n_take = pos[(pos!=0)&(pos.shift()!=pos)].shape[0] / ndays # entries
         n_exit = pos[(pos==0)&(pos.shift()!=pos)].shape[0] / ndays # exits
         n_flip = pos[(pos.shift()*pos<0)].shape[0]/ ndays # flips
-        
+
         net_pos = pos.mean()
         gross_pos = pos.abs().mean()
         sample_interval = (pos.index[1]-pos.index[0]).total_seconds()
         dfpos = pos.groupby((pos!= pos.shift()).cumsum()).agg(len=('count'), val=('first'))
         holding = dfpos.loc[dfpos.val!=0, 'len'].mean() * sample_interval # average holding
         median_holding = dfpos.loc[dfpos.val!=0, 'len'].median() * sample_interval # median holding
-        
+
         d_volume = (pos - pos.shift()).abs().sum()/ndays # daily volume
         d_pnl = pnl.sum() / ndays
-        
+        d_shrp = get_daily_sharpe(pnl)
+
         trds = dict(
             fee = round(feebp, 1),
             n_take = round(n_take, 1),
@@ -768,7 +814,17 @@ def get_trade_summary(dfpnl):
             holding = round(holding, 1),
             d_volume = round(d_volume, 1),
             d_pnl = round(d_pnl, 1),
+            d_shrp = round(d_shrp, 2),
         )
+        
+        mbiaspct = None # A measure of overfitting for marketable sample.
+        if dfo is not None and target_name in dfo.columns:
+            dfentry = dfo[dfo.valid & (pos.shift() != pos) & (pos != 0)]
+            mbiaspct = ((dfentry.pred - dfentry[target_name]) * np.sign(dfentry.pred)).mean() / dfentry.pred.abs().mean()
+
+            trds['bias'] = round(biaspct, 2)
+            trds['mbias'] = round(mbiaspct, 2)
+
         trds_list.append(trds)
     dftsumm = pd.DataFrame(trds_list)
     return dftsumm
