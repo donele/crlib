@@ -1,6 +1,15 @@
 # Regression and Backtesting on BTCUSDT
 
+<!--
+<table>
+    <tr><td>
+    DISCLAIMER: This document is a strictly confidential communication to and solely for the use of the recipient and may not be reproduced or circulated. If you are not the intended recipient, you may not disclose or use the information in this documentation in any way. The information is not intended as an offer or solicitaion with respect to the purchase or sale of any security.
+    </td></tr>
+</table>
+
 The library source code for the analysis is available at https://github.com/donele/crlib.
+-->
+
 
 ## Data
 
@@ -58,11 +67,11 @@ The prediction horizon is set to 6 seconds. It is possible to let the model choo
 
 Following plot shows the relationship between the target and prediction in 100 prediction quantiles. Top and bottom 1 percent of the predictions' sizes are approximately 0.8 basis point. The predictions do not exceed the trading fee which may be 2 - 5 basis points, depending on the trading venue.
 
-![](pics/target_prediction_100bins_12h_12h.png)
+![](pics/target_prediction_100bins_tar_6_1d_1d.png)
 
 The standard deviation of the targets are added in the following plots to show the noisy nature of the target-prediction relationships.
 
-![](pics/target_prediction_errorbar_12h_12h.png)
+![](pics/target_prediction_errorbar_tar_6_1d_1d.png)
 
 ## Backtesting
 
@@ -76,30 +85,38 @@ The cost of crossing the spread is calculated as half of the adjusted width (0.5
 
 The trading is simulated between 2024-07-07 and 2024-07-31. A number of simulations are generated with different trading fees. The fill ratio is assumed to be 100%.
 
-![](pics/cumpnl_12h_12h.png)
+![](pics/cumpnl_tar_6_1d_1d.png)
 
 The trading cost for the market is 2.7 basis points. The model performs reliably only when the fee is 0.5 basis point or less for the 25 day backtesting period. Given the simplicity of the model and the abundant possibilities to improve the model, this is not a discouraging result. Here is the summary of each simulation with different trading fees.
 
-| fee|n_take|n_exit|n_flip|net_pos|gross_pos|holding|d_volume|d_pnl|bias|mbias|d_shrp |
-| --:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--: |
-| 0.5|5896.3|213.0|5683.3|-0.0151|0.9269|13.2|11792.6|8.6|0.11|0.09|8.86 |
-| 1.0|156.0|47.0|109.0|0.0249|0.5419|292.7|312.0|0.6|0.11|0.06|0.78 |
-| 2.7|0.7|0.7|0.1|0.0369|0.0598|6754.0|1.5|-0.0|0.11|0.32|-0.05 |
+|fee| n_take|n_exit|n_flip|n_pos|g_pos|holding|bias|mbias|d_volume|d_pnl|d_shrp |
+|---| --:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--: |
+| 0.5 | 6054.1|214.2|5839.8|-0.0168|0.9272|12.9|0.12|0.09|12108.1|8.6|8.23 |
+| 1.0 | 165.4|51.6|113.8|0.0034|0.5349|272.4|0.12|0.14|330.8|0.3|0.44 |
+| 2.7 | 0.8|0.6|0.2|0.0488|0.0679|6801.0|0.12|-0.57|1.7|0.1|0.16 |
 
  - fee: Trading fee in basis points.
  - n_take: Number of position-takes per day.
  - n_exit: Number of position-exits per day.
  - n_flip: Number of position-flips per day.
- - net_pos: Average net position.
- - gross_pos: Average gross position.
+ - n_pos: Average net position.
+ - g_pos: Average gross position.
  - holding: Average holding period in seconds.
- - d_volume: Average daily trading volume.
- - d_pnl: Average daily pnl.
  - bias: A measure of overfitting, independent of the trading fee.
  - mbias: A measure of overfitting, calculated from only marketable data points.
+ - d_volume: Average daily trading volume.
+ - d_pnl: Average daily pnl.
  - d_shrp[1]: Daily sharpe ratio. (Daily-ized from the 100 ms sample intervals.)
 
-[1]: "d_shrp" (Daily Sharpe Ratio): In high frequency trading, the annual sharpe ratio does not explain the strategy very well. Rather, a daily sharpe can provide more insight. For example, a daily sharpe of 0.78 means that a daily pnl can be negative with a 22% chance, assuming a normal distribution.
+[1]: "d_shrp" (Daily Sharpe Ratio): In high frequency trading, the annual sharpe ratio does not explain the strategy very well. Rather, a daily sharpe can provide more insight. For example, a daily sharpe of 0.44 means that a daily pnl can be negative with a 33% chance, assuming a normal distribution.
+
+Following table shows that theres are more losing trade than winning ones (w_rat = 0.45 for fee = 0.5). The overall pnl comes out positive because the pnl for the wins are bigger than the losses (w_mean = 84.09 > abs(l_mean) = 42.87). The profitability between the buys and sells are similar to each other (b_gpt = 14.5, s_gpt = 14.0).
+
+|fee| w_rat|bw_rat|sw_rat|gpt|b_gpt|s_gpt|w_mean|w_std|l_mean|l_std |
+|---| --:|--:|--:|--:|--:|--:|--:|--:|--:|--: |
+| 0.5 | 0.45|0.45|0.45|14.24|14.51|13.97|84.09|101.04|-42.87|53.11 |
+| 1.0 | 0.51|0.50|0.51|19.32|31.27|7.81|269.97|550.79|-238.72|491.81 |
+| 2.7 | 0.57|0.6|0.5|648.20|961.74|-135.65|2503.1|2719.29|-1824.97|1567.6 |
 
 Questions:
 
@@ -124,6 +141,14 @@ Questions:
  - Is there any room to improve the latency of the market data feed system?
  - Is the model that calculates the adjusted mid prices using the memory cache efficiently? Can the code be optimized further, e.g. for cache warming or branch misses?
  - Are there market participants who receive the data of better quality and less latency, such as designated market makers?
+
+An example is shown in the next plot. The adjusted mid price becomes available about 1 ms after the last trade.
+
+![](pics/ts_20240815_020000.060_020000.110.png)
+
+The delay from trade to adjusted price in another example shown below is 3 ms.
+
+![](pics/ts_20240815_021313.4485_021313.453.png)
 
 ## Future Plans
 
