@@ -442,7 +442,7 @@ def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=
     if (dft is None or dfv is None or dft.loc[dft.valid].shape[0] < min_data_cnt
         or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
         return selected_features, best_b
-    
+
     allfeatures = [x for x in dft.columns if x.startswith('ret_') or x.startswith('medqimb_')
                 or x.startswith('qimax_') or x.startswith('hilo')]
     if not debug_nfeature is None:
@@ -568,10 +568,10 @@ def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, features=None, debu
             Xo['const'] = 1
             yo = dfo[target_name]
             pred = Xo @ best_b
-        
+
             dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name] + selected_features]
             dfo['pred'] = pred
-        
+
             return dfo
     return None
 
@@ -711,7 +711,7 @@ def get_aggpnl(pnl):
         aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(second=0, microsecond=0))).sum()
 
     return aggpnl
-    
+
 def get_pnls(dfo, target_name, feebp_list):
     '''
     Calculates multiple pnl series using the trading fees passed from the caller.
@@ -778,11 +778,13 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         dftopbot = dfo[(dfo.pred < predlim.iloc[0]) | (dfo.pred > predlim.iloc[1])]
         biaspct = ((dftopbot.pred - dftopbot[target_name]) * np.sign(dftopbot.pred)).mean() / dftopbot.pred.abs().mean()
 
-    trds_list = []
+    summ_list = []
+    # pertrade_list = []
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
-        pos = dfpnl[feebp]['pos']
-        pnl = dfpnl[feebp]['pnl']
+        df = dfpnl[feebp]
+        pos = df['pos']
+        pnl = df['pnl']
 
         ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
 
@@ -794,8 +796,8 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         n_exit = pos[(pos==0)&(pos.shift()!=pos)&(pos.shift().notna())].shape[0] / ndays # exits
         n_flip = pos[(pos.shift()*pos<0)].shape[0]/ ndays # flips
 
-        net_pos = pos.mean()
-        gross_pos = pos.abs().mean()
+        n_pos = pos.mean()
+        g_pos = pos.abs().mean()
         sample_interval = (pos.index[1]-pos.index[0]).total_seconds()
         dfpos = pos.groupby((pos!= pos.shift()).cumsum()).agg(len=('count'), val=('first'))
         holding = dfpos.loc[dfpos.val!=0, 'len'].mean() * sample_interval # average holding
@@ -805,37 +807,69 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         d_pnl = pnl.sum() / ndays
         d_shrp = get_daily_sharpe(pnl)
 
-        trds = dict(
-            fee = round(feebp, 1),
-            n_take = round(n_take, 1),
-            n_exit = round(n_exit, 1),
-            n_flip = round(n_flip, 1),
-            
-            net_pos = round(net_pos, 4),
-            gross_pos = round(gross_pos, 4),
-            holding = round(holding, 1),
-            d_volume = round(d_volume, 1),
-            d_pnl = round(d_pnl, 1),
-            d_shrp = round(d_shrp, 2),
-        )
-        
+        dfpnltrd = df.groupby((df.pos.shift() != df.pos).cumsum()).agg(
+            pos=('pos', 'mean'), pnl=('pnl', lambda x: x.sum()))
+        dfpnltrd = dfpnltrd[dfpnltrd.pos != 0]
+
+        w_rat = len(dfpnltrd[dfpnltrd.pnl > 0]) / len(dfpnltrd)
+        bw_rat = len(dfpnltrd[(dfpnltrd.pnl > 0)&(dfpnltrd.pos > 0)]) / len(dfpnltrd[dfpnltrd.pos > 0])
+        sw_rat = len(dfpnltrd[(dfpnltrd.pnl > 0)&(dfpnltrd.pos < 0)]) / len(dfpnltrd[dfpnltrd.pos < 0])
+
+        gpt = dfpnltrd.pnl.mean()*1e4
+        b_gpt = dfpnltrd[dfpnltrd.pos > 0].pnl.mean()*1e4
+        s_gpt = dfpnltrd[dfpnltrd.pos < 0].pnl.mean()*1e4
+        (w_mean, w_std) = dfpnltrd[dfpnltrd.pnl>0].pnl.agg(['mean', 'std'])*1e4
+        (l_mean, l_std) = dfpnltrd[dfpnltrd.pnl<0].pnl.agg(['mean', 'std'])*1e4
+
         mbiaspct = 0 # A measure of overfitting for marketable sample.
         if dfo is not None and target_name in dfo.columns:
             dfentry = dfo[dfo.valid & (pos.shift() != pos) & (pos != 0)]
             mbiaspct = ((dfentry.pred - dfentry[target_name]) * np.sign(dfentry.pred)).mean() / dfentry.pred.abs().mean()
 
-            trds['bias'] = round(biaspct, 2)
-            trds['mbias'] = round(mbiaspct, 2)
+        summ = dict(
+            fee = round(feebp, 2),
+            n_take = round(n_take, 1),
+            n_exit = round(n_exit, 1),
+            n_flip = round(n_flip, 1),
 
-        trds_list.append(trds)
-    dftsumm = pd.DataFrame(trds_list).set_index('fee')
+            n_pos = round(n_pos, 4),
+            g_pos = round(g_pos, 4),
+            holding = round(holding, 1),
+            bias = round(biaspct, 2),
+            mbias = round(mbiaspct, 2),
+            d_volume = round(d_volume, 1),
+            d_pnl = round(d_pnl, 1),
+            d_shrp = round(d_shrp, 2),
+
+            w_rat = round(w_rat, 2),
+            bw_rat = round(bw_rat, 2),
+            sw_rat = round(sw_rat, 2),
+            gpt = round(gpt, 2),
+            b_gpt = round(b_gpt, 2),
+            s_gpt = round(s_gpt, 2),
+            w_mean = round(w_mean, 2),
+            w_std = round(w_std, 2),
+            l_mean = round(l_mean, 2),
+            l_std = round(l_std, 2),
+         )
+        summ_list.append(summ)
+
+    dftsumm = pd.DataFrame(summ_list).set_index('fee')
     return dftsumm
+
+def basic_cols():
+    return ['n_take', 'n_exit', 'n_flip', 'n_pos', 'g_pos', 'holding', 'bias', 'mbias',
+       'd_volume', 'd_pnl', 'd_shrp']
+
+def detail_cols():
+    return ['w_rat', 'bw_rat', 'sw_rat', 'gpt', 'b_gpt', 's_gpt', 'w_mean', 'w_std',
+       'l_mean', 'l_std']
 
 def print_markdown(dftrdsumm):
     '''
     Prints out the formatted text to be included in the markdown document as a table.
     '''
-    print('|', '|'.join(dftrdsumm.columns), '|')
-    print('|', '|'.join(['--:'] * len(dftrdsumm.columns)), '|')
+    print('|fee|', '|'.join(dftrdsumm.columns), '|')
+    print('|---|', '|'.join(['--:'] * len(dftrdsumm.columns)), '|')
     for indx, row in dftrdsumm.iterrows():
-        print('|', '|'.join(row.astype(str).tolist()), '|')
+        print('|', indx, '|', '|'.join(row.astype(str).tolist()), '|')
