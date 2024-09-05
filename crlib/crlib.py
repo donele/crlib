@@ -515,6 +515,7 @@ def linreg(target_name, dft, fit_features, verbose=False):
             print(dft.columns.tolist())
             print(dft.valid.sum())
             print(fit_features)
+
     return b
 
 def train_linear(target_name, dtt, dtv, dto, feature_dir,
@@ -649,7 +650,8 @@ def plot_target_prediction_errorbar(dfo, target_name):
     Plots target vs prediction in 13 quantiles of varying sizes.
     '''
     plt.figure()
-    bc = pd.cut(dfo.pred, dfo.pred.quantile([0, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.68, 0.84, 0.92, 0.96, 0.98, 0.99, 1]))
+    bc = pd.cut(dfo.pred, dfo.pred.quantile([0, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.68, 0.84, 0.92, 0.96, 0.98, 0.99, 1]),
+               duplicates='drop')
     bcgrp = dfo.groupby(bc)[target_name].agg(['mean', 'std'])
     bcx = dfo.groupby(bc).pred.mean()
     plt.errorbar(bcx, bcgrp['mean'], yerr=bcgrp['std'], fmt='o', capsize=5)
@@ -770,7 +772,7 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
     Returns:
         A dataframe.
     '''
-    biaspct = None # A measure of overfitting. Indpendent of trading cost.
+    biaspct = 0 # A measure of overfitting. Indpendent of trading cost.
     if dfo is not None and target_name in dfo.columns:
         predlim = dfo.pred.quantile([0.01, 0.99])
         dftopbot = dfo[(dfo.pred < predlim.iloc[0]) | (dfo.pred > predlim.iloc[1])]
@@ -789,7 +791,7 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         n_nopos = pos[pos==0].shape[0] # no position
 
         n_take = pos[(pos!=0)&(pos.shift()!=pos)].shape[0] / ndays # entries
-        n_exit = pos[(pos==0)&(pos.shift()!=pos)].shape[0] / ndays # exits
+        n_exit = pos[(pos==0)&(pos.shift()!=pos)&(pos.shift().notna())].shape[0] / ndays # exits
         n_flip = pos[(pos.shift()*pos<0)].shape[0]/ ndays # flips
 
         net_pos = pos.mean()
@@ -817,7 +819,7 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
             d_shrp = round(d_shrp, 2),
         )
         
-        mbiaspct = None # A measure of overfitting for marketable sample.
+        mbiaspct = 0 # A measure of overfitting for marketable sample.
         if dfo is not None and target_name in dfo.columns:
             dfentry = dfo[dfo.valid & (pos.shift() != pos) & (pos != 0)]
             mbiaspct = ((dfentry.pred - dfentry[target_name]) * np.sign(dfentry.pred)).mean() / dfentry.pred.abs().mean()
@@ -826,7 +828,7 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
             trds['mbias'] = round(mbiaspct, 2)
 
         trds_list.append(trds)
-    dftsumm = pd.DataFrame(trds_list)
+    dftsumm = pd.DataFrame(trds_list).set_index('fee')
     return dftsumm
 
 def print_markdown(dftrdsumm):
