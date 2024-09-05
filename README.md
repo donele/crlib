@@ -1,6 +1,5 @@
 # Regression and Backtesting on BTCUSDT
 
-<!--
 <table>
     <tr><td>
     DISCLAIMER: This document is a strictly confidential communication to and solely for the use of the recipient and may not be reproduced or circulated. If you are not the intended recipient, you may not disclose or use the information in this documentation in any way. The information is not intended as an offer or solicitaion with respect to the purchase or sale of any security.
@@ -8,7 +7,6 @@
 </table>
 
 The library source code for the analysis is available at https://github.com/donele/crlib.
--->
 
 
 ## Data
