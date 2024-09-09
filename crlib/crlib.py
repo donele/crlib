@@ -3,7 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import os
+import sys
+import glob
 import datetime
+import seaborn as sns
 import yaml
 from datetime import timedelta
 
@@ -52,7 +55,7 @@ def parse_dt(dt):
     hh = dt.hour
     return yyyymmdd, hh
 
-def read_data(datatype, dt, data_dir, locale, columns=None, product=None):
+def read_data(datatype, dt, data_dir, locale, index_col, columns=None, product=None):
     '''
     Reads the tick data of the specified datatype for the time dt.
     '''
@@ -67,38 +70,41 @@ def read_data(datatype, dt, data_dir, locale, columns=None, product=None):
     df = pd.read_parquet(path, columns=readcols)
 
     if product is None:
-        df['date'] = pd.to_datetime(df.ts, unit='us')
+        df['date'] = pd.to_datetime(df[index_col], unit='us')
         df = df.set_index(product_cols)
     else:
         df = df[(df.exchange==product[0])&(df.symbol==product[1])]
-        df['date'] = pd.to_datetime(df.ts, unit='us')
+        df['date'] = pd.to_datetime(df[index_col], unit='us')
         df = df.set_index('date').sort_index()
     df = df.drop(columns=[x for x in df.columns if columns is not None and x not in columns])
 
     return df
 
-def read_trade(dt, data_dir, locale, columns=['price', 'abs_qty', 'net_qty', 'ts'], product=None):
+def read_trade(dt, data_dir, locale, index_col,
+               columns=['price', 'abs_qty', 'net_qty', 't0', 'ts'], product=None):
     '''
     Reads the trade data for the time dt.
     '''
-    df = read_data('trade', dt, data_dir, locale, columns, product)
+    df = read_data('trade', dt, data_dir, locale, index_col, columns, product)
     return df
 
-def read_bbo(dt, data_dir, locale, columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 'ts'], product=None):
+def read_bbo(dt, data_dir, locale, index_col,
+             columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 't0', 'ts'], product=None):
     '''
     Reads the bbo data for the time dt.
     '''
-    df = read_data('bbo', dt, data_dir, locale, columns, product)
+    df = read_data('bbo', dt, data_dir, locale, index_col, columns, product)
     return df
 
-def read_midpx(dt, data_dir, locale, columns=['mid_px', 'adj_width', 'adj_mid_px', 'ts'], product=None):
+def read_midpx(dt, data_dir, locale, index_col,
+               columns=['mid_px', 'adj_width', 'adj_mid_px', 't0', 'ts'], product=None):
     '''
     Reads the midpx data for the time dt.
     '''
-    df = read_data('midpx', dt, data_dir, locale, columns, product)
+    df = read_data('midpx', dt, data_dir, locale, index_col, columns, product)
     return df
 
-def read_range(datatype, product, st, et, data_dir, locale):
+def read_range(datatype, product, st, et, data_dir, locale, index_col):
     '''
     Reads the tick data of the specified type within the specified time range st and et.
     '''
@@ -112,7 +118,7 @@ def read_range(datatype, product, st, et, data_dir, locale):
     dt_range = pd.date_range(st, et, freq='h')
     datalist = []
     for dt in dt_range:
-        df0 = func(dt, data_dir, locale, product=product)
+        df0 = func(dt, data_dir, locale, index_col, product=product)
         datalist.append(df0)
 
     if np.all([x is None for x in datalist]):
@@ -120,7 +126,7 @@ def read_range(datatype, product, st, et, data_dir, locale):
     df = pd.concat(datalist)
     return df
 
-def read3(dt1, data_dir, locale, product, func):
+def read3(dt1, data_dir, locale, index_col, product, func):
     '''
     Reads the data in three consecutive periods from before dt1 to after dt1.
     '''
@@ -128,29 +134,13 @@ def read3(dt1, data_dir, locale, product, func):
     dt2 = dt1 + timedelta(hours=1)
 
     datalist = []
-    datalist.append(func(dt0, data_dir, locale, product=product))
-    datalist.append(func(dt1, data_dir, locale, product=product))
-    datalist.append(func(dt2, data_dir, locale, product=product))
+    datalist.append(func(dt0, data_dir, locale, index_col, product=product))
+    datalist.append(func(dt1, data_dir, locale, index_col, product=product))
+    datalist.append(func(dt2, data_dir, locale, index_col, product=product))
 
     if np.any([x is None for x in datalist]):
         return None
     df = pd.concat(datalist)
-    return df
-
-def get_features3(dt1, sample_interval, data_dir, locale, product=None, mid_col='price'):
-    '''
-    Reads the data in three consecutive periods
-    '''
-    dt0 = dt1 - timedelta(hours=1)
-    dt2 = dt1 + timedelta(hours=1)
-
-    dft = read3(dt1, data_dir, locale, product=product, func=read_trade)
-    dfb = read3(dt1, data_dir, locale, product=product, func=read_bbo)
-    dfm = read3(dt1, data_dir, locale, product=product, func=read_midpx)
-    if dft is None or dfb is None or dfm is None:
-        return None
-    df = get_features(dft, dfb, dfm, sample_interval, mid_col=mid_col)
-    df = df.loc[dt1:(dt2-timedelta(microseconds=1))]
     return df
 
 ## Plotting
@@ -230,12 +220,13 @@ def get_returns(df, rangemax, varname, returns_func):
     return serlist
 
 def features_future_returns(df, rangemax=10):
-    return get_returns(df, rangemax, 'ret', returns_func=future_returns)
+    return get_returns(df, rangemax, 'tar', returns_func=future_returns)
 
 def features_past_returns(df, rangemax=10):
-    return get_returns(df, rangemax, 'tar', returns_func=past_returns)
+    return get_returns(df, rangemax, 'ret', returns_func=past_returns)
 
-def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmrangemax=8, max_tsince_trade=5, mid_col='price', verbose=False):
+def get_features(dft, dfb, dfm, sample_interval, mid_col, index_col, rangemax=8, vtrangemax=14, vmrangemax=8,
+                 max_tsince_trade=5, verbose=False):
     '''
     Calculates the features.
 
@@ -243,8 +234,8 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
         A dataframe.
     '''
 
-    tgrp = pd.to_datetime(dft.ts // sample_interval * sample_interval, unit='us')
-    dfts = dft.groupby(tgrp).agg(
+    tgrp = pd.to_datetime(dft[index_col] // sample_interval * sample_interval, unit='us')
+    dftagg = dft.groupby(tgrp).agg(
         price=('price', 'last'),
         avg_price=('price', 'mean'),
         min_price=('price', 'min'),
@@ -254,35 +245,33 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
         last_trade=('price', lambda x: x.index[-1]),
     )
     if verbose:
-        print(dfts)
+        print(dftagg)
 
     dfb['qimb'] = ((dfb.askqty - dfb.bidqty) / (dfb.askqty + dfb.bidqty)).fillna(0).replace([np.inf, -np.inf], 0)
 
-    bgrp = pd.to_datetime(dfb.ts // sample_interval * sample_interval, unit='us')
-    dfbs = dfb.groupby(bgrp).agg(
+    bgrp = pd.to_datetime(dfb[index_col] // sample_interval * sample_interval, unit='us')
+    dfbagg = dfb.groupby(bgrp).agg(
         qimb=('qimb', 'last'),
         adj_askpx=('adj_askpx', 'last'),
         adj_bidpx=('adj_bidpx', 'last'),
         max_askqty=('askqty', 'max'),
         max_bidqty=('bidqty', 'max'),
-        # med_spreadbp=('spreadbp', 'median'),
     )
 
-    mgrp = pd.to_datetime(dfm.ts // sample_interval * sample_interval, unit='us')
-    dfms = dfm.groupby(mgrp).agg(
+    mgrp = pd.to_datetime(dfm[index_col] // sample_interval * sample_interval, unit='us')
+    dfmagg = dfm.groupby(mgrp).agg(
         adj_width=('adj_width', 'last'),
         adj_mid_px=('adj_mid_px', 'last'),
     )
 
     # Merge trade and bbo
 
-    allindx = pd.date_range(dfbs.index[0], dfbs.index[-1], freq=datetime.timedelta(microseconds=sample_interval))
-    df = pd.concat([dfbs.reindex(allindx), dfts.reindex(allindx), dfms.reindex(allindx)], axis=1)
+    allindx = pd.date_range(dfbagg.index[0], dfbagg.index[-1], freq=datetime.timedelta(microseconds=sample_interval))
+    df = pd.concat([dfbagg.reindex(allindx), dftagg.reindex(allindx), dfmagg.reindex(allindx)], axis=1)
 
     # mid price, to be used for some feature calculation.
     # df['mid'] = df['adj_askpx'] - df['adj_bidpx'] # this can be negative!
-    df['mid'] = df['adj_mid_px'] # Synthetic price from a model.
-    # df['mid'] = df['price'] # Trade price may be a proxy for the mid.
+    df['mid'] = df[mid_col] # Synthetic price from a model.
 
     # ffill
     ffill_cols = ['mid', 'adj_askpx', 'adj_bidpx', 'adj_width', 'last_trade']
@@ -297,7 +286,7 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
     # BBO related features
 
     ## Future returns
-    serlst.extend(features_future_returns(df))
+    serlst.extend(features_future_returns(df, rangemax))
 
     ## Past returns
     serlst.extend(features_past_returns(df, rangemax))
@@ -403,6 +392,23 @@ def get_features(dft, dfb, dfm, sample_interval, rangemax=8, vtrangemax=14, vmra
     df = pd.concat([df] + serlst, axis=1)
     return df
 
+def get_features3(dt1, sample_interval, data_dir, locale, product, rangemax=8, vtrangemax=14, vmrangemax=8,
+                  mid_col=None, index_col=None):
+    '''
+    Reads the data in three consecutive periods
+    '''
+    dt0 = dt1 - timedelta(hours=1)
+    dt2 = dt1 + timedelta(hours=1)
+
+    dft = read3(dt1, data_dir, locale, index_col, product=product, func=read_trade)
+    dfb = read3(dt1, data_dir, locale, index_col, product=product, func=read_bbo)
+    dfm = read3(dt1, data_dir, locale, index_col, product=product, func=read_midpx)
+    if dft is None or dfb is None or dfm is None:
+        return None
+    df = get_features(dft, dfb, dfm, sample_interval, mid_col, index_col, rangemax, vtrangemax, vmrangemax)
+    df = df.loc[dt1:(dt2-timedelta(microseconds=1))]
+    return df
+
 def read_features(dt1, dt2, feature_dir):
     '''
     Reads the features data in the time range between dt1 and dt2.
@@ -427,6 +433,36 @@ def read_features(dt1, dt2, feature_dir):
         df = pd.concat(dflist)
         return df
     return None
+
+def plot_test_features(dff):
+    tarcols = [x for x in dff.columns if x.startswith('tar')]
+    ncol = len(tarcols)
+    nx = int(ncol**.5) + 1
+    ny = nx + 1
+
+    dff[tarcols].hist(figsize=(16,2*ny), bins=80)
+    dff[tarcols].hist(figsize=(16,2*ny), bins=80, log=True)
+
+    feature_groups = ['ret_', 'medqimb_', 'qimax_', 'hilo_', 'diff_sum_avg_qty_', 'diff_sum_net_qty_']
+    for fg in feature_groups:
+        cols = [x for x in dff.columns if x.startswith(fg)]
+        dff[cols].hist(figsize=(16,12), bins=40)
+
+        plt.figure(figsize=(16,4))
+
+        plt.subplot(121)
+        dfcorr = dff[cols+tarcols].corr().iloc[:len(cols), len(cols):]
+        sns.heatmap(dfcorr, cmap='RdYlGn_r', linewidths=0.5, annot=False)
+
+        plt.subplot(122)
+        nc = 5
+        tar = tarcols[0]
+        for col in cols:
+            qc = pd.qcut(dff[col], nc, duplicates='drop')
+            plt.plot(dff.groupby(qc)[tar].mean().tolist(), label=col)
+        plt.grid()
+        if(len(col) < 10):
+            plt.legend()
 
 ## Fitting
 
@@ -485,12 +521,14 @@ def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=
             break
         else:
             print(f'Selected {new_feature} r2 {new_r2:.4f}')
+            sys.stdout.flush()
             best_r2 = new_r2
             best_b = new_b
             selected_features.append(new_feature)
             remaining_features.remove(new_feature)
 
     print(f'Selected features: {selected_features}')
+    sys.stdout.flush()
     return selected_features, best_b
 
 def linreg(target_name, dft, fit_features, verbose=False):
@@ -552,7 +590,7 @@ def get_dts(st, fit_window, val_window, oos_window):
     dte = dto + timedelta(hours=oos_window)
     return dtv, dto, dte
 
-def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, features=None, debug_nfeature=None):
+def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc='', features=None, debug_nfeature=None, do_write=True):
     '''
     Performs fitting with the specified train, validate, and out-of-sample dates.
 
@@ -572,29 +610,32 @@ def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, features=None, debu
             dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name] + selected_features]
             dfo['pred'] = pred
 
+            if do_write:
+                write_oos(dfo, feature_dir, target_name, fitdesc='')
             return dfo
     return None
 
-def pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, features=None, debug_nfeature=None):
-    dfo = oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, features, debug_nfeature)
+def pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc='', features=None, debug_nfeature=None):
+    dfo = oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc, features, debug_nfeature)
     if dfo is not None and dfo.shape[0] > 0 and 'pred' in dfo.columns:
         return dfo['pred']
     return None
 
 def rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
-                    features=None, debug_nfeature=None):
+                    fitdesc='', features=None, debug_nfeature=None):
     '''
     Performs fitting with rolling window between st and et.
 
     Returns:
         Out of sample prediction.
     '''
-    pred_list = []
+    pred_list = [] # This will be removed later. Results are written to disk, no need to return here.
     dtt = st
     dtv, dto, dte = get_dts(st, fit_window, val_window, oos_window)
     while(dte <= et):
         print(dtt, dtv, dto, dte)
-        pred = pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, features, debug_nfeature)
+        sys.stdout.flush()
+        pred = pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc, features, debug_nfeature)
         if pred is not None:
             pred_list.append(pred)
 
@@ -605,6 +646,24 @@ def rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window
         return allpred
     return None
 
+def get_oos_dir(feature_dir, target_name, fitdesc):
+    _fitdesc = fitdesc if len(fitdesc) == 0 else '_'+fitdesc
+    oosdir = f'{feature_dir}/fit/{target_name}{_fitdesc}'
+    if not os.path.exists(oosdir):
+        os.makedirs(oosdir)
+    return oosdir
+
+def get_oos_path(dt1, dt2, feature_dir, target_name, fitdesc):
+    oos_dir = get_oos_dir(feature_dir, target_name, fitdesc)
+    path = f'{oos_dir}/oos.{get_idate(dt1)}.{get_idate(dt2)}.parquet'
+    return path
+
+def write_oos(dfo, feature_dir, target_name, fitdesc):
+    path = get_oos_path(dfo.index[0], dfo.index[-1], feature_dir, target_name, fitdesc)
+    dfo.to_parquet(path)
+    print(f'oos pred written to {path}')
+    return
+
 def rolling_oos_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
               fitdesc='', features=None, debug_nfeature=None):
     '''
@@ -613,21 +672,37 @@ def rolling_oos_linear(target_name, st, et, feature_dir, fit_window, val_window,
     Returns:
         Out of sample test result with prediction.
     '''
-    oospred = rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
-                             features, debug_nfeature)
-    dfo = read_features(st + timedelta(hours=fit_window+val_window), et, feature_dir)
-    if dfo is not None and dfo.shape[0] > 0:
-        dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name]]
-        dfo['pred'] = oospred
-        oosdir = f'{feature_dir}/fit/{target_name}'
-        if not os.path.exists(oosdir):
-            os.makedirs(oosdir)
-        _fitdesc = fitdesc if len(fitdesc) == 0 else '_'+fitdesc
-        path = f'{oosdir}/oos{_fitdesc}_{get_idate(dfo.index[0])}_{get_idate(dfo.index[-1])}.parquet'
-        dfo.to_parquet(path)
-        print(f'oos pred written to {path}')
-        return dfo
+    rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
+                             fitdesc, features, debug_nfeature)
+    if False:
+        dfo = read_features(st + timedelta(hours=fit_window+val_window), et, feature_dir)
+        if dfo is not None and dfo.shape[0] > 0:
+            write_oos(dfo, feature_dir, target_name, fitdesc)
     return None
+
+def read_oos(target_name, st, et, feature_dir, fitdesc):
+    oos_dir = get_oos_dir(feature_dir, target_name, fitdesc)
+    idate1 = get_idate(st)
+    idate2 = get_idate(et)
+    filenames = glob.glob(oos_dir+'/*')
+    def within_range(x):
+        x = os.path.basename(x)
+        xsp = x.split('.')
+        if len(xsp) == 4:
+            d1, d2 = xsp[1:3]
+            ret = d1.isnumeric() and d2.isnumeric() and int(d1) >= idate1 and int(d2) <= idate2
+            return ret
+        return False
+    filenames = [x for x in filenames if within_range(x)]
+    dflist = []
+    for filename in filenames:
+        df = pd.read_parquet(filename)
+        dflist.append(df)
+    dfo = pd.concat(dflist)
+    if dfo.index.duplicated().any():
+        print('duplicated index')
+        return None
+    return dfo
 
 def plot_target_prediction(dfo, target_name):
     '''
@@ -754,10 +829,10 @@ def plot_pnl(dfpnl):
     '''
     Plots the cumulative pnl.
     '''
+    plt.figure()
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
         pnl = dfpnl[feebp]['pnl']
-        # d_shrp = get_daily_sharpe(pnl)
         plt.plot(pnl.cumsum(), label=f'fee={feebp}bp')
     plt.title('cumulative pnl')
     plt.ylabel('pnl')
@@ -779,7 +854,6 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         biaspct = ((dftopbot.pred - dftopbot[target_name]) * np.sign(dftopbot.pred)).mean() / dftopbot.pred.abs().mean()
 
     summ_list = []
-    # pertrade_list = []
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
         df = dfpnl[feebp]
@@ -807,19 +881,21 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         d_pnl = pnl.sum() / ndays
         d_shrp = get_daily_sharpe(pnl)
 
-        dfpnltrd = df.groupby((df.pos.shift() != df.pos).cumsum()).agg(
+        dft = df.groupby((df.pos.shift() != df.pos).cumsum()).agg(
             pos=('pos', 'mean'), pnl=('pnl', lambda x: x.sum()))
-        dfpnltrd = dfpnltrd[dfpnltrd.pos != 0]
+        dft = dft[dft.pos != 0]
 
-        w_rat = len(dfpnltrd[dfpnltrd.pnl > 0]) / len(dfpnltrd)
-        bw_rat = len(dfpnltrd[(dfpnltrd.pnl > 0)&(dfpnltrd.pos > 0)]) / len(dfpnltrd[dfpnltrd.pos > 0])
-        sw_rat = len(dfpnltrd[(dfpnltrd.pnl > 0)&(dfpnltrd.pos < 0)]) / len(dfpnltrd[dfpnltrd.pos < 0])
+        w_rat = len(dft[dft.pnl > 0]) / len(dft) if len(dft) > 0 else 0
+        dftb = dft[dft.pos > 0]
+        bw_rat = len(dftb[dftb.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
+        dfts = dft[dft.pos < 0]
+        sw_rat = len(dfts[dfts.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
 
-        gpt = dfpnltrd.pnl.mean()*1e4
-        b_gpt = dfpnltrd[dfpnltrd.pos > 0].pnl.mean()*1e4
-        s_gpt = dfpnltrd[dfpnltrd.pos < 0].pnl.mean()*1e4
-        (w_mean, w_std) = dfpnltrd[dfpnltrd.pnl>0].pnl.agg(['mean', 'std'])*1e4
-        (l_mean, l_std) = dfpnltrd[dfpnltrd.pnl<0].pnl.agg(['mean', 'std'])*1e4
+        gpt = dft.pnl.mean()*1e4
+        b_gpt = dft[dft.pos > 0].pnl.mean()*1e4
+        s_gpt = dft[dft.pos < 0].pnl.mean()*1e4
+        (w_mean, w_std) = dft[dft.pnl>0].pnl.agg(['mean', 'std'])*1e4
+        (l_mean, l_std) = dft[dft.pnl<0].pnl.agg(['mean', 'std'])*1e4
 
         mbiaspct = 0 # A measure of overfitting for marketable sample.
         if dfo is not None and target_name in dfo.columns:
