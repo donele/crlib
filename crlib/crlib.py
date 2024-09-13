@@ -409,7 +409,7 @@ def get_features3(dt1, sample_interval, data_dir, locale, product, rangemax=8, v
     df = df.loc[dt1:(dt2-timedelta(microseconds=1))]
     return df
 
-def read_features(dt1, dt2, feature_dir):
+def read_features(dt1, dt2, feature_dir, features=None):
     '''
     Reads the features data in the time range between dt1 and dt2.
 
@@ -426,7 +426,7 @@ def read_features(dt1, dt2, feature_dir):
         if not os.path.exists(path):
             print(path, ' not found.')
             continue
-        df = pd.read_parquet(path)
+        df = pd.read_parquet(path, columns=features)
         if df is not None and df.shape[0] > 0:
             dflist.append(df)
     if len(dflist) > 0:
@@ -600,14 +600,13 @@ def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc='', feature
     selected_features, best_b = train_linear(target_name, dtt, dtv, dto, feature_dir,
                                              features, verbose=False, debug_nfeature=debug_nfeature)
     if best_b is not None:
-        dfo = read_features(dto, dte, feature_dir)
+        dfo = read_features(dto, dte, feature_dir, selected_features+[target_name])
         if dfo is not None and dfo.shape[0] > 0:
             Xo = dfo[selected_features].copy()
             Xo['const'] = 1
-            yo = dfo[target_name]
             pred = Xo @ best_b
 
-            dfo = dfo[['adj_askpx', 'adj_bidpx', 'price', 'adj_width', 'adj_mid_px', 'tsince_trade', 'valid', target_name] + selected_features]
+            dfo = dfo[[target_name]]
             dfo['pred'] = pred
 
             if do_write:
@@ -615,13 +614,7 @@ def oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc='', feature
             return dfo
     return None
 
-def pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc='', features=None, debug_nfeature=None):
-    dfo = oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc, features, debug_nfeature)
-    if dfo is not None and dfo.shape[0] > 0 and 'pred' in dfo.columns:
-        return dfo['pred']
-    return None
-
-def rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
+def rolling_oos_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
                     fitdesc='', features=None, debug_nfeature=None):
     '''
     Performs fitting with rolling window between st and et.
@@ -629,21 +622,21 @@ def rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window
     Returns:
         Out of sample prediction.
     '''
-    pred_list = [] # This will be removed later. Results are written to disk, no need to return here.
+    dfo_list = []
     dtt = st
     dtv, dto, dte = get_dts(st, fit_window, val_window, oos_window)
     while(dte <= et):
         print(dtt, dtv, dto, dte)
         sys.stdout.flush()
-        pred = pred_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc, features, debug_nfeature)
-        if pred is not None:
-            pred_list.append(pred)
+        dfo = oos_linear(target_name, dtt, dtv, dto, dte, feature_dir, fitdesc, features, debug_nfeature)
+        if dfo is not None:
+            dfo_list.append(dfo)
 
         dtt = dtt + timedelta(hours=oos_window)
         dtv, dto, dte = get_dts(dtt, fit_window, val_window, oos_window)
-    if len(pred_list) > 0:
-        allpred = pd.concat(pred_list)
-        return allpred
+    if len(dfo_list) > 0:
+        dfoall = pd.concat(dfo_list)
+        return dfoall
     return None
 
 def get_oos_dir(feature_dir, target_name, fitdesc):
@@ -663,22 +656,6 @@ def write_oos(dfo, feature_dir, target_name, fitdesc):
     dfo.to_parquet(path)
     print(f'oos pred written to {path}')
     return
-
-def rolling_oos_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
-              fitdesc='', features=None, debug_nfeature=None):
-    '''
-    Performs fitting with rolling window between st and et.
-
-    Returns:
-        Out of sample test result with prediction.
-    '''
-    rolling_pred_linear(target_name, st, et, feature_dir, fit_window, val_window, oos_window,
-                             fitdesc, features, debug_nfeature)
-    if False:
-        dfo = read_features(st + timedelta(hours=fit_window+val_window), et, feature_dir)
-        if dfo is not None and dfo.shape[0] > 0:
-            write_oos(dfo, feature_dir, target_name, fitdesc)
-    return None
 
 def read_oos(target_name, st, et, feature_dir, fitdesc):
     oos_dir = get_oos_dir(feature_dir, target_name, fitdesc)
