@@ -662,12 +662,13 @@ def read_oos(target_name, st, et, feature_dir, fitdesc):
     idate1 = get_idate(st)
     idate2 = get_idate(et)
     filenames = glob.glob(oos_dir+'/*')
+    filenames.sort()
     def within_range(x):
         x = os.path.basename(x)
         xsp = x.split('.')
         if len(xsp) == 4:
             d1, d2 = xsp[1:3]
-            ret = d1.isnumeric() and d2.isnumeric() and int(d1) >= idate1 and int(d2) <= idate2
+            ret = d1 == d2 and d1.isnumeric() and d2.isnumeric() and int(d1) >= idate1 and int(d2) <= idate2
             return ret
         return False
     filenames = [x for x in filenames if within_range(x)]
