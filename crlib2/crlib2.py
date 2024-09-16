@@ -211,44 +211,50 @@ def get_timeindex(interval):
         timeindex = None
     return timeindex
 
-def future_returns(prc, i):
+def future_returns(prc, ri):
     r = None
-    if prc is not None and len(prc) > i:
-        r = (prc.shift(-2**(i-1)) / prc - 1).fillna(0).replace([np.inf, -np.inf], 0)
+    if prc is not None and len(prc) > ri:
+        r = (prc.shift(-2**ri) / prc - 1).fillna(0).replace([np.inf, -np.inf], 0)
     return r
 
-def past_returns(prc, i):
+def past_returns(prc, ri):
     r = None
-    if prc is not None and len(prc) > i:
-        r = (prc / prc.shift(2**(i-1)) - 1).fillna(0).replace([np.inf, -np.inf], 0)
+    if prc is not None and len(prc) > ri:
+        r = (prc / prc.shift(2**ri) - 1).fillna(0).replace([np.inf, -np.inf], 0)
     return r
 
-def get_returns(df, max_timex, varname, returns_func):
+def get_returns(df, sample_timex, max_timex, varname, returns_func):
     '''
     Calculates the future returns.
+
+    ri: Relative index.
+    ai: Absolute index.
     '''
     serdict = {}
-    for i in range(1, max_timex):
-        ser = returns_func(df.mid, i)
-        ser.name = f'{varname}_{i}'
+    for ri in range(max_timex - 1):
+        ser = returns_func(df.mid, ri)
+        ai = ri + sample_timex
+        ser.name = f'{varname}_{ai}'
         serdict[ser.name] = ser
 
-    for i in range(1, max_timex):
-        for j in range(i+1, max_timex):
-            name1 = f'{varname}_{i}'
-            name2 = f'{varname}_{j}'
-            ser = serdict[name2] - serdict[name1]
-            ser.name = f'diff_{varname}_{i}_{j}'
-            serdict[ser.name] = ser
+    for ri in range(max_timex - 2):
+        rj = ri + 1
+        ai = ri + sample_timex
+        aj = rj + sample_timex
+        name1 = f'{varname}_{ai}'
+        name2 = f'{varname}_{aj}'
+        ser = serdict[name2] - serdict[name1]
+        ser.name = f'diff_{varname}_{ai}_{aj}'
+        serdict[ser.name] = ser
 
     serlist = list(serdict.values())
     return serlist
 
-def features_future_returns(df, max_timex=10):
-    return get_returns(df, max_timex, 'tar', returns_func=future_returns)
+def features_future_returns(df, sample_timex, max_timex=10):
+    return get_returns(df, sample_timex, max_timex, 'tar', returns_func=future_returns)
 
-def features_past_returns(df, max_timex=10):
-    return get_returns(df, max_timex, 'ret', returns_func=past_returns)
+def features_past_returns(df, sample_timex, max_timex=10):
+    return get_returns(df, sample_timex, max_timex, 'ret', returns_func=past_returns)
 
 def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None,
                  max_tsince_trade=5, verbose=False):
@@ -352,50 +358,57 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     # BBO related features
 
     ## Future returns
-    serlst.extend(features_future_returns(df, max_timex))
+    serlst.extend(features_future_returns(df, sample_timex, max_timex))
 
     ## Past returns
-    serlst.extend(features_past_returns(df, max_timex))
+    serlst.extend(features_past_returns(df, sample_timex, max_timex))
 
     ## Median qimb
 
-    for i in range(1, max_timex+1):
-        w = 2**(i-1)
+    for ri in range(max_timex):
+        w = 2**ri
         ser = df.qimb.rolling(window=w, min_periods=1).median().fillna(0).replace([np.inf, -np.inf], 0)
-        ser.name = f'medqimb_{i}'
+        ai = ri + sample_timex
+        ser.name = f'medqimb_{ai}'
         serlst.append(ser)
 
     ## qimax
 
-    for i in range(1, max_timex+1):
-        w = 2**(i-1)
-        aname = f'max_askqty_{i}'
-        bname = f'max_bidqty_{i}'
+    for ri in range(max_timex):
+        w = 2**ri
+        ai = ri + sample_timex
+        aname = f'max_askqty_{ai}'
+        bname = f'max_bidqty_{ai}'
         aser = df.max_askqty.rolling(window=w, min_periods=1).max()
         bser = df.max_bidqty.rolling(window=w, min_periods=1).max()
         aser.name = aname
         bser.name = bname
         qiser = ((aser - bser) / (aser + bser)).fillna(0).replace([np.inf, -np.inf], 0)
-        qiser.name = f'qimax_{i}'
+        qiser.name = f'qimax_{ai}'
         serlst.append(qiser)
 
     ## Volatility
 
     volatlist = []
     rser = df.price / df.price.shift(1) - 1
-    for i in range(1, max_timex+1):
-        w = 2**(i+1)
+    #for ri in range(1, max_timex+1):
+    for ri in range(2, max_timex):
+        w = 2**ri
         ser = rser.rolling(window=w, min_periods=1).std()
-        ser.name = f'volat_{i}'
+        ai = ri + sample_timex
+        ser.name = f'volat_{ai}'
         volatlist.append(ser)
     dfvolat = pd.DataFrame(volatlist).T
 
-    for i in range(2, 8):
-        for j in range(max(4, i + 1), max_timex+1):
-            name1 = f'volat_{i}'
-            name2 = f'volat_{j}'
+    #for ri in range(2, 8):
+    for ri in range(2, max_timex):
+        ai = ri + sample_timex
+        for rj in range(max(4, ri + 1), max_timex):
+            aj = rj + sample_timex
+            name1 = f'volat_{ai}'
+            name2 = f'volat_{aj}'
             ser = ((dfvolat[name1] - dfvolat[name2]) / dfvolat[name2].abs()).fillna(0).replace([np.inf, -np.inf], 0)
-            ser.name = f'diff_volat_{i}_{j}'
+            ser.name = f'diff_volat_{ai}_{aj}'
             serlst.append(ser)
 
     # Trade related feature
@@ -403,20 +416,22 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     ## Hilo
 
     hllst = []
-    for i in range(1, max_timex+1):
-        w = 2**(i-1)
+    for ri in range(max_timex):
+        w = 2**ri
         hiser = df.max_price.rolling(window=w, min_periods=1).max()
         loser = df.min_price.rolling(window=w, min_periods=1).min()
-        hiser.name = f'max_price_{i}'
-        loser.name = f'min_price_{i}'
+        ai = ri + sample_timex
+        hiser.name = f'max_price_{ai}'
+        loser.name = f'min_price_{ai}'
         hllst.append(hiser)
         hllst.append(loser)
     dfhl = pd.DataFrame(hllst).T
-    for i in range(1, max_timex+1):
-        hiname = f'max_price_{i}'
-        loname = f'min_price_{i}'
+    for ri in range(max_timex):
+        ai = ri + sample_timex
+        hiname = f'max_price_{ai}'
+        loname = f'min_price_{ai}'
         ser = ((df.price - (.5*dfhl[hiname] + .5*dfhl[loname])) / (.5*dfhl[hiname] - .5*dfhl[loname])).fillna(0).replace([np.inf, -np.inf], 0)
-        ser.name = f'hilo_{i}'
+        ser.name = f'hilo_{ai}'
         serlst.append(ser)
 
 
@@ -425,32 +440,37 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     avglst = []
     netlst = []
 
-    for i in range(1, max_timex+1):
-        w = 2**(i-1)
+    for ri in range(max_timex):
+        w = 2**ri
         aser = df.sum_avg_qty.rolling(window=w, min_periods=1).sum()
         nser = df.sum_net_qty.rolling(window=w, min_periods=1).sum()
-        aser.name = f'sum_avg_qty_{i}'
-        nser.name = f'sum_net_qty_{i}'
+        ai = ri + sample_timex
+        aser.name = f'sum_avg_qty_{ai}'
+        nser.name = f'sum_net_qty_{ai}'
         avglst.append(aser)
         netlst.append(nser)
     dfavg = pd.DataFrame(avglst).T
     dfnet = pd.DataFrame(netlst).T
 
-    for i in range(1, 5):
-        for j in range(i + 1, max_timex+1):
-            name1 = f'sum_avg_qty_{i}'
-            name2 = f'sum_avg_qty_{j}'
+    for ri in range(5):
+        ai = ri + sample_timex
+        for rj in range(ri + 1, max_timex):
+            aj = rj + sample_timex
+            name1 = f'sum_avg_qty_{ai}'
+            name2 = f'sum_avg_qty_{aj}'
             ser = ((dfavg[name1] - dfavg[name2]) / dfavg[name2].abs()).fillna(0).replace([np.inf, -np.inf], 0)
-            ser.name = f'diff_sum_avg_qty_{i}_{j}'
+            ser.name = f'diff_sum_avg_qty_{ai}_{aj}'
             serlst.append(ser)
 
-    for i in range(1, 5):
-        for j in range(i + 1, max_timex+1):
-            name1 = f'sum_net_qty_{i}'
-            name2 = f'sum_net_qty_{j}'
-            name3 = f'sum_avg_qty_{j}'
+    for ri in range(5):
+        ai = ri + sample_timex
+        for rj in range(ri + 1, max_timex):
+            aj = rj + sample_timex
+            name1 = f'sum_net_qty_{ai}'
+            name2 = f'sum_net_qty_{aj}'
+            name3 = f'sum_avg_qty_{aj}'
             ser = ((dfnet[name1] - dfnet[name2]) / dfavg[name3].abs()).fillna(0).replace([np.inf, -np.inf], 0)
-            ser.name = f'diff_sum_net_qty_{i}_{j}'
+            ser.name = f'diff_sum_net_qty_{ai}_{aj}'
             serlst.append(ser)
 
     # Concat all
@@ -477,13 +497,19 @@ def get_features3(dt1, par, max_timex=None):
     df = df.loc[dt1:(dt2-timedelta(microseconds=1))]
     return df
 
-def get_feature_dir(par):
+def get_feature_dir(par, basedir='/home/jdlee'):
     exch = par['product'][0]
     sym = par['product'][1]
     pname = par['proj_name']
-    icol = par['index_col']
-    feature_dir = f'/home/jdlee/crfeat/{exch}.{sym}.{icol}.{pname}'
+    feature_dir = f'{basedir}/crfeature/{exch}.{sym}.{pname}'
     return feature_dir
+
+def get_fit_dir(par, basedir='/home/jdlee'):
+    exch = par['product'][0]
+    sym = par['product'][1]
+    pname = par['proj_name']
+    fit_dir = f'{basedir}/crfit/{exch}.{sym}.{pname}'
+    return fit_dir
 
 def write_feature(dt, par):
     df0 = get_features3(dt, par)
@@ -636,7 +662,7 @@ def linreg(target_name, dft, fit_features, verbose=False):
     try:
         b = (np.linalg.inv(X.T @ X) @ X.T @ y).array
     except:
-        print('Failed: ', feature)
+        print('Failed: ', fit_feature)
         if verbose:
             print(dft.shape, X.shape, y.shape)
             print(dft.columns.tolist())
@@ -679,7 +705,7 @@ def get_dts(st, fit_window, val_window, oos_window):
     dte = dto + timedelta(hours=oos_window)
     return dtv, dto, dte
 
-def oos_linear(fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=None, do_write_pred=True):
+def oos_linear(par, fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=None, do_write_pred=True):
     '''
     Performs fitting with the specified train, validate, and out-of-sample dates.
 
@@ -699,11 +725,11 @@ def oos_linear(fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=None, d
             dfo['pred'] = pred
 
             if do_write_pred:
-                write_oos(dfo, fitpar['feature_dir'], fitpar['target_name'], fit_desc=fitpar['fit_desc'])
+                write_pred(dfo, par, fitpar)
             return dfo
     return None
 
-def rolling_oos_linear(fitpar, st, et, features=None, debug_nfeature=None):
+def rolling_oos_linear(par, fitpar, st, et, features=None, debug_nfeature=None):
     '''
     Performs fitting with rolling window between st and et.
 
@@ -716,7 +742,7 @@ def rolling_oos_linear(fitpar, st, et, features=None, debug_nfeature=None):
     while(dte <= et):
         print(dtt, dtv, dto, dte)
         sys.stdout.flush()
-        dfo = oos_linear(fitpar, dtt, dtv, dto, dte, features, debug_nfeature)
+        dfo = oos_linear(par, fitpar, dtt, dtv, dto, dte, features, debug_nfeature)
         if dfo is not None:
             dfo_list.append(dfo)
 
@@ -727,29 +753,31 @@ def rolling_oos_linear(fitpar, st, et, features=None, debug_nfeature=None):
         return dfoall
     return None
 
-def get_oos_dir(feature_dir, target_name, fit_desc):
-    _fit_desc = fit_desc if len(fit_desc) == 0 else '_'+fit_desc
-    oosdir = f'{feature_dir}/fit/{target_name}{_fit_desc}'
-    if not os.path.exists(oosdir):
-        os.makedirs(oosdir)
-    return oosdir
+def get_pred_dir(par, fitpar):
+    pred_dir = f'{get_fit_dir(par)}/{fitpar["target_name"]}'
+    if 'fit_desc' in fitpar and fitpar['fit_desc'] != '':
+        pred_dir += '.' + fitpar['fit_desc']
+    pred_dir += '/pred'
+    if not os.path.exists(pred_dir):
+        os.makedirs(pred_dir)
+    return pred_dir
 
-def get_oos_path(dt1, dt2, feature_dir, target_name, fit_desc):
-    oos_dir = get_oos_dir(feature_dir, target_name, fit_desc)
-    path = f'{oos_dir}/oos.{get_idate(dt1)}.{get_idate(dt2)}.parquet'
+def get_pred_path(dt1, dt2, par, fitpar):
+    pred_dir = get_pred_dir(par, fitpar)
+    path = f'{pred_dir}/pred.{get_idate(dt1)}.{get_idate(dt2)}.parquet'
     return path
 
-def write_oos(dfo, feature_dir, target_name, fit_desc):
-    path = get_oos_path(dfo.index[0], dfo.index[-1], feature_dir, target_name, fit_desc)
+def write_pred(dfo, par, fitpar):
+    path = get_pred_path(dfo.index[0], dfo.index[-1], par, fitpar)
     dfo.to_parquet(path)
     print(f'oos pred written to {path}')
     return
 
-def read_oos(target_name, st, et, feature_dir, fit_desc):
-    oos_dir = get_oos_dir(feature_dir, target_name, fit_desc)
+def read_pred(par, fitpar, st, et):
+    pred_dir = get_pred_dir(par, fitpar)
     idate1 = get_idate(st)
     idate2 = get_idate(et)
-    filenames = glob.glob(oos_dir+'/*')
+    filenames = glob.glob(pred_dir+'/*')
     filenames.sort()
     def within_range(x):
         x = os.path.basename(x)
