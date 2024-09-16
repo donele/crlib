@@ -391,7 +391,6 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     volatlist = []
     rser = df.price / df.price.shift(1) - 1
-    #for ri in range(1, max_timex+1):
     for ri in range(2, max_timex):
         w = 2**ri
         ser = rser.rolling(window=w, min_periods=1).std()
@@ -400,7 +399,6 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
         volatlist.append(ser)
     dfvolat = pd.DataFrame(volatlist).T
 
-    #for ri in range(2, 8):
     for ri in range(2, max_timex):
         ai = ri + sample_timex
         for rj in range(max(4, ri + 1), max_timex):
@@ -671,7 +669,7 @@ def linreg(target_name, dft, fit_features, verbose=False):
 
     return b
 
-def train_linear(target_name, dtt, dtv, dto, feature_dir,
+def train_linear(target_name, dft, dfv,
                  features=None, verbose=False, debug_nfeature=None):
     '''
     Performs a linear regression with a fixed feature set, or by selecting
@@ -680,8 +678,6 @@ def train_linear(target_name, dtt, dtv, dto, feature_dir,
     Returns:
         List of the selected features and the regression coefficients.
     '''
-    dft = read_features(dtt, dtv, feature_dir)
-    dfv = read_features(dtv, dto, feature_dir)
     selected_features = None
     best_b = None
     if features is None: # select features with validation data.
@@ -712,17 +708,38 @@ def oos_linear(par, fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=No
     Returns:
         Series of predictions.
     '''
-    selected_features, best_b = train_linear(fitpar['target_name'], dtt, dtv, dto, fitpar['feature_dir'],
+    feature_dir = fitpar['feature_dir']
+    dft = read_features(dtt, dtv, feature_dir)
+    dfv = read_features(dtv, dto, feature_dir)
+    dft['TAR'] = dft[fitpar['target_name']]
+    dfv['TAR'] = dfv[fitpar['target_name']]
+
+    # if prior fit exists, read the pred, subtract from target
+    if 'prior_fit' in fitpar:
+        pred_dir = get_pred_dir_from_name(par, fitpar['prior_fit'])
+        train_prior_pred = read_pred_from_dir(pred_dir, dtt, dtv)['totpred']
+        valid_prior_pred = read_pred_from_dir(pred_dir, dtv, dto)['totpred']
+        dft['TAR'] -= train_prior_pred
+        dfv['TAR'] -= valid_prior_pred
+
+    selected_features, best_b = train_linear('TAR', dft, dfv,
                                              features, verbose=False, debug_nfeature=debug_nfeature)
     if best_b is not None:
-        dfo = read_features(dto, dte, fitpar['feature_dir'], selected_features+[fitpar['target_name']])
+        dfo = read_features(dto, dte, feature_dir, selected_features+[fitpar['target_name']])
         if dfo is not None and dfo.shape[0] > 0:
             Xo = dfo[selected_features].copy()
             Xo['const'] = 1
             pred = Xo @ best_b
 
-            dfo = dfo[[fitpar['target_name']]]
-            dfo['pred'] = pred
+            oos_target = dfo[fitpar['target_name']].rename('target')
+            if 'prior_fit' in fitpar:
+                oos_prior_pred = read_pred_from_dir(pred_dir, dto, dte)['totpred']
+                dfo = pd.concat([oos_target,
+                    (oos_target - oos_prior_pred).rename('restarget'),
+                    pred.rename('respred'),
+                    (oos_prior_pred + pred).rename('totpred')], axis=1)
+            else:
+                dfo = pd.concat([oos_target, pred.rename('totpred')], axis=1)
 
             if do_write_pred:
                 write_pred(dfo, par, fitpar)
@@ -753,13 +770,18 @@ def rolling_oos_linear(par, fitpar, st, et, features=None, debug_nfeature=None):
         return dfoall
     return None
 
-def get_pred_dir(par, fitpar):
-    pred_dir = f'{get_fit_dir(par)}/{fitpar["target_name"]}'
-    if 'fit_desc' in fitpar and fitpar['fit_desc'] != '':
-        pred_dir += '.' + fitpar['fit_desc']
-    pred_dir += '/pred'
+def get_pred_dir_from_name(par, fit_name):
+    pred_dir = f'{get_fit_dir(par)}/{fit_name}/pred'
     if not os.path.exists(pred_dir):
         os.makedirs(pred_dir)
+    return pred_dir
+
+def get_pred_dir(par, fitpar):
+    fit_name = fitpar['target_name']
+    if 'fit_desc' in fitpar and fitpar['fit_desc'] != '':
+        fit_name += '.' + fitpar['fit_desc']
+
+    pred_dir = get_pred_dir_from_name(par, fit_name)
     return pred_dir
 
 def get_pred_path(dt1, dt2, par, fitpar):
@@ -774,17 +796,19 @@ def write_pred(dfo, par, fitpar):
     return
 
 def read_pred(par, fitpar, st, et):
-    pred_dir = get_pred_dir(par, fitpar)
+    return read_pred_from_dir(get_pred_dir(par, fitpar), st, et)
+
+def read_pred_from_dir(pred_dir, st, et):
     idate1 = get_idate(st)
-    idate2 = get_idate(et)
+    idate2 = get_idate(et) # exclusive
     filenames = glob.glob(pred_dir+'/*')
     filenames.sort()
     def within_range(x):
         x = os.path.basename(x)
         xsp = x.split('.')
-        if len(xsp) == 4:
+        if len(xsp) == 4 and xsp[0] == 'pred':
             d1, d2 = xsp[1:3]
-            ret = d1 == d2 and d1.isnumeric() and d2.isnumeric() and int(d1) >= idate1 and int(d2) <= idate2
+            ret = d1 == d2 and d1.isnumeric() and d2.isnumeric() and int(d1) >= idate1 and int(d2) < idate2
             return ret
         return False
     filenames = [x for x in filenames if within_range(x)]
@@ -798,24 +822,24 @@ def read_pred(par, fitpar, st, et):
         return None
     return dfo
 
-def plot_target_prediction(dfo, target_name):
+def plot_target_prediction(dfo):
     plt.figure(figsize=(12,4))
     ax = plt.subplot(1, 2, 1)
-    plot_target_prediction_nquantiles(dfo, target_name, n=100, ax=ax)
+    plot_target_prediction_nquantiles(dfo, n=100, ax=ax)
     ax = plt.subplot(1, 2, 2)
-    plot_target_prediction_errorbar(dfo, target_name, ax=ax)
+    plot_target_prediction_errorbar(dfo, ax=ax)
     plt.tight_layout()
 
-def plot_target_prediction_nquantiles(dfo, target_name, n=100, ax=None):
+def plot_target_prediction_nquantiles(dfo, n=100, ax=None):
     '''
     Plots target vs prediciton in 100 prediction quantiles.
     '''
     if ax is None:
         plt.figure()
-    corr = dfo.pred.corr(dfo[target_name])
-    qc = pd.qcut(dfo.pred, n, duplicates='drop')
-    tarpred = dfo.groupby(qc)[target_name].mean()
-    mean_preds = dfo.groupby(qc).pred.mean()
+    corr = dfo.totpred.corr(dfo.target)
+    qc = pd.qcut(dfo.totpred, n, duplicates='drop')
+    tarpred = dfo.groupby(qc).target.mean()
+    mean_preds = dfo.groupby(qc).totpred.mean()
     plt.plot(mean_preds, tarpred, label=f'corr {corr:.4f}')
     plt.title('target vs prediction (out-of-sample)')
     plt.xlabel('prediciton')
@@ -823,16 +847,16 @@ def plot_target_prediction_nquantiles(dfo, target_name, n=100, ax=None):
     plt.grid()
     plt.legend()
 
-def plot_target_prediction_errorbar(dfo, target_name, ax=None):
+def plot_target_prediction_errorbar(dfo, ax=None):
     '''
     Plots target vs prediction in 13 quantiles of varying sizes.
     '''
     if ax is None:
         plt.figure()
-    bc = pd.cut(dfo.pred, dfo.pred.quantile([0, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.68, 0.84, 0.92, 0.96, 0.98, 0.99, 1]),
+    bc = pd.cut(dfo.totpred, dfo.totpred.quantile([0, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.68, 0.84, 0.92, 0.96, 0.98, 0.99, 1]),
                duplicates='drop')
-    bcgrp = dfo.groupby(bc)[target_name].agg(['mean', 'std'])
-    bcx = dfo.groupby(bc).pred.mean()
+    bcgrp = dfo.groupby(bc).target.agg(['mean', 'std'])
+    bcx = dfo.groupby(bc).totpred.mean()
     plt.errorbar(bcx, bcgrp['mean'], yerr=bcgrp['std'], fmt='o', capsize=5)
     plt.title('target vs prediction w/ error bars')
     plt.xlabel('prediction')
