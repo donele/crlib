@@ -11,6 +11,7 @@ import yaml
 from datetime import timedelta
 from math import *
 
+import lightgbm as lgb
 from sklearn.linear_model import LinearRegression
 
 ## Data Hangling
@@ -581,7 +582,7 @@ def plot_test_features(dff):
         if(len(col) < 10):
             plt.legend()
 
-## Fitting
+## Linear Regression
 
 class BasicLinearModel:
     def __init__(self, feature_names, coefs):
@@ -594,7 +595,21 @@ class BasicLinearModel:
         sys.stdout.flush()
         return pred
 
-def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
+def linreg(target_name, dft, fit_features, verbose=False):
+    '''
+    Performs a OLS minimization.
+
+    Returns:
+        Linear regression coefficients.
+    '''
+    X = dft.loc[dft.valid, fit_features] # this will be copied inside LinearRegression
+    y = dft.loc[dft.valid, target_name]
+
+    model = LinearRegression()
+    model.fit(X, y)
+    return model
+
+def linreg_select_features(target_name, dft, dfv, metric='r2', feature_groups=None,
         verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
     Select feaures recursively using validation sample.
@@ -603,10 +618,10 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
         Series of selected features and the regression coefficients.
     '''
     selected_features = []
-    model = None
+    best_model = None
     if (dft is None or dfv is None or dft.loc[dft.valid].shape[0] < min_data_cnt
         or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
-        return model
+        return best_model
 
     if feature_groups is None:
         feature_groups=['ret', 'medqimb', 'qimax', 'hilo']
@@ -621,7 +636,6 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
 
     thres = 0.01
     best_metric = 0
-    best_model = None
     while True:
         new_metric = 0
         new_model = None
@@ -666,20 +680,6 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
     sys.stdout.flush()
     return best_model
 
-def linreg(target_name, dft, fit_features, verbose=False):
-    '''
-    Performs a OLS minimization.
-
-    Returns:
-        Linear regression coefficients.
-    '''
-    X = dft.loc[dft.valid, fit_features] # this will be copied inside LinearRegression
-    y = dft.loc[dft.valid, target_name]
-
-    model = LinearRegression()
-    model.fit(X, y)
-    return model
-
 def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
         features=None, verbose=False, debug_nfeature=None):
     '''
@@ -691,15 +691,125 @@ def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
     '''
     model = None
     if features is None: # select features with validation data.
-        model = select_features_linear(target_name, dft, dfv, metric,
+        model = linreg_select_features(target_name, dft, dfv, metric,
                 feature_groups=feature_groups,
                 verbose=verbose, debug_nfeature=debug_nfeature)
-    else:
-        if dfv.shape[0] > 0: # feature set is fixed.
-            selected_features = features
-            coefs = linreg(target_name, dft, features, verbose)
-            model = BasicLinearModel(features, coefs)
+    else: # feature set is fixed.
+        model = linreg(target_name, dft, features, verbose)
     return model
+
+## Tree fitting
+
+def lgbreg(target_name, dft, dfv, features, max_depth=None, num_leaves=None,
+        min_child_samples=None, n_estimators=40, verbose=False):
+    X = dft.loc[dft.valid, features]
+    y = dft.loc[dft.valid, target_name]
+    Xv = dfv.loc[dfv.valid, features]
+    yv = dfv.loc[dfv.valid, target_name]
+
+    verbosity = 1 if verbose else -1
+    reg_par = {
+        'metric': 'rmse',
+        'n_estimators': n_estimators,
+        'max_depth': max_depth,
+        'num_leaves': num_leaves,
+        'min_child_samples': min_child_samples,
+        'verbosity': verbosity,
+    }
+    fit_par = {
+        'eval_set': [(X, y), (Xv, yv)],
+        'eval_names': ['train', 'valid'],
+        'callbacks': [lgb.early_stopping(stopping_rounds=3, verbose=0), lgb.log_evaluation(period=0)],
+    }
+    model = lgb.LGBMRegressor(**reg_par)
+    model.fit(X, y, **fit_par)
+    return model
+
+def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=None,
+        verbose=False, debug_nfeature=None, min_data_cnt=10):
+    '''
+    Select feaures recursively using validation sample.
+
+    Returns:
+        Series of selected features and the regression coefficients.
+    '''
+    model = None
+    if (dft is None or dfv is None or dft.loc[dft.valid].shape[0] < min_data_cnt
+        or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
+        return model
+
+    if feature_groups is None:
+        feature_groups=['diff_ret', 'medqimb', 'qimax', 'hilo']
+
+    allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
+    if not debug_nfeature is None:
+        allfeatures = allfeatures[:min(len(allfeatures), debug_nfeature)]
+
+    print(f'Total {len(allfeatures)} features: {allfeatures}')
+
+    n_rep = 18
+    n_sim = 100
+    selection_early_stop = True
+
+    max_best_va = 0
+    mxd_range = [2, 7]
+    nl_range = [10, 100]
+    mcs_exp_range = [6, 14]
+
+    final_model = None
+    va_list = []
+    score_list = []
+    dflist = []
+    features = allfeatures.copy()
+    for irep in range(n_rep):
+        if verbose:
+            print(f'Starting.. features={features}')
+            print(f'mxd: {mxd_range} nl: {nl_range} mcs: {mcs_exp_range}')
+
+        for _ in range(n_sim):
+            mxd = np.random.randint(*mxd_range)
+            nl = np.random.randint(*nl_range)
+            mcs = int(2**np.random.uniform(*mcs_exp_range))
+            model = lgbreg(target_name, dft, dfv, features,
+                    max_depth=mxd, num_leaves=nl, min_child_samples=mcs, verbose=verbose)
+
+            Xv = dfv.loc[dfv.valid, features]
+            yv = dfv.loc[dfv.valid, target_name]
+            valid_score = model.score(Xv, yv)
+            dfimportance = pd.DataFrame({'name': model.feature_name_, 'importance': model.feature_importances_})
+            score_list.append([mxd, nl, mcs, valid_score, dfimportance, model])
+
+        df0 = pd.DataFrame(data=score_list, columns=['mxd', 'nl', 'mcs', 'va', 'imp', 'model'])
+        if irep % 2 == 0:
+            df1 = df0.loc[df0.va >= df0.va.quantile(0.9)]
+            mxd_range = [max(2, int(df1.mxd.min()) - 1), int(df1.mxd.max()) + 2]
+            nl_range = [max(2, int(df1.nl.min()) - 1), int(df1.nl.max()) + 2]
+            mcs_exp_range = [int(np.log2(df1.mcs.min())) - 1, int(np.log2(df1.mcs.max())) + 1]
+        else:
+            dflist.append(df0)
+            df0 = df0.sort_values(by='va')
+            best_row = df0.iloc[-1]
+            best_va = best_row.va
+            va_list.append(best_va)
+            if verbose:
+                print(f'best n: {best_row.n} mxd: {best_row.mxd} nl: {best_row.nl} mcs: {best_row.mcs} va: {best_row.va:.4}')
+
+            if best_va > max_best_va:
+                max_best_va = best_va;
+            elif selection_early_stop:
+                break
+
+            model0 = df0.iloc[-1]['model']
+            final_model = model0
+
+            dfimp = df0.iloc[-1]['imp']
+            dfimp = dfimp.sort_values(by='importance')
+            features = dfimp.iloc[len(dfimp)//3:]['name'].tolist()
+            score_list = []
+
+    if verbose:
+        print(f'Selected features: {selected_features}')
+    return final_model
 
 def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
                  features=None, verbose=False, debug_nfeature=None):
@@ -713,10 +823,11 @@ def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
     selected_features = None
     model = None
     if features is None: # select features with validation data.
-        pass
+        model = lgbreg_select_features(target_name, dft, dfv, metric,
+                feature_groups=feature_groups,
+                verbose=verbose, debug_nfeature=debug_nfeature)
     else:
-        if dfv.shape[0] > 0: # feature set is fixed.
-            selected_features = features
+        return None
     return model
 
 def get_dts(st, fit_window, val_window, oos_window):
