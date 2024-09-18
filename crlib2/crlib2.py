@@ -581,6 +581,16 @@ def plot_test_features(dff):
 
 ## Fitting
 
+class BasicLinearModel:
+    def __init__(self, feature_names, coefs):
+        self.feature_names_ = feature_names
+        self.coefs_ = coefs
+    def predict(self, X):
+        X_ = X.copy()
+        X_['const'] = 1
+        pred = X_ @ self.coefs_
+        return pred
+
 def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
         verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
@@ -590,16 +600,14 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
         Series of selected features and the regression coefficients.
     '''
     selected_features = []
-    best_b = None
+    model = None
     if (dft is None or dfv is None or dft.loc[dft.valid].shape[0] < min_data_cnt
         or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
-        return selected_features, best_b
+        return model
 
     if feature_groups is None:
         feature_groups=['ret', 'medqimb', 'qimax', 'hilo']
 
-    #allfeatures = [x for x in dft.columns if x.startswith('ret_') or x.startswith('medqimb_')
-                #or x.startswith('qimax_') or x.startswith('hilo')]
     allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
     if not debug_nfeature is None:
         allfeatures = allfeatures[:min(len(allfeatures), debug_nfeature)]
@@ -652,7 +660,8 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
 
     print(f'Selected features: {selected_features}')
     sys.stdout.flush()
-    return selected_features, best_b
+    model = BasicLinearModel(selected_features, best_b)
+    return model
 
 def linreg(target_name, dft, fit_features, verbose=False):
     '''
@@ -688,17 +697,17 @@ def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
     Returns:
         List of the selected features and the regression coefficients.
     '''
-    selected_features = None
-    best_b = None
+    model = None
     if features is None: # select features with validation data.
-        selected_features, best_b = select_features_linear(target_name, dft, dfv, metric,
+        model = select_features_linear(target_name, dft, dfv, metric,
                 feature_groups=feature_groups,
                 verbose=verbose, debug_nfeature=debug_nfeature)
     else:
         if dfv.shape[0] > 0: # feature set is fixed.
             selected_features = features
-            best_b = linreg(target_name, dft, features, verbose)
-    return selected_features, best_b
+            coefs = linreg(target_name, dft, features, verbose)
+            model = BasicLinearModel(features, coefs)
+    return model
 
 def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
                  features=None, verbose=False, debug_nfeature=None):
@@ -710,15 +719,13 @@ def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
         List of the selected features and the regression coefficients.
     '''
     selected_features = None
-    best_b = None
+    model = None
     if features is None: # select features with validation data.
-        #selected_features, best_b = select_features_linear(target_name, dft, dfv, verbose, debug_nfeature)
         pass
     else:
         if dfv.shape[0] > 0: # feature set is fixed.
             selected_features = features
-            #best_b = linreg(target_name, dft, features, verbose)
-    return selected_features, best_b
+    return model
 
 def get_dts(st, fit_window, val_window, oos_window):
     '''
@@ -765,16 +772,16 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
         dft['TAR'] -= train_prior_pred
         dfv['TAR'] -= valid_prior_pred
 
-    selected_features, best_b = fit_func(
+    model = fit_func(
             'TAR', dft, dfv, metric=metric, feature_groups=feature_groups,
             features=features, verbose=verbose, debug_nfeature=debug_nfeature)
+    selected_features = model.feature_names_in_ if hasattr(model, 'feature_names_in_') else model.feature_names_ if hasattr(model, 'feature_names_') else None
 
-    if best_b is not None:
+    if model is not None:
         dfo = read_features(dto, dte, feature_dir, selected_features+[fitpar['target_name']])
         if dfo is not None and dfo.shape[0] > 0:
             Xo = dfo[selected_features].copy()
-            Xo['const'] = 1
-            pred = Xo @ best_b
+            pred = model.predict(Xo)
 
             oos_target = dfo[fitpar['target_name']].rename('target')
             if 'prior_fit' in fitpar:
