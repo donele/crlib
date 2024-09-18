@@ -11,6 +11,8 @@ import yaml
 from datetime import timedelta
 from math import *
 
+from sklearn.linear_model import LinearRegression
+
 ## Data Hangling
 
 crdata_map = {
@@ -589,6 +591,7 @@ class BasicLinearModel:
         X_ = X.copy()
         X_['const'] = 1
         pred = X_ @ self.coefs_
+        sys.stdout.flush()
         return pred
 
 def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
@@ -616,24 +619,25 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
 
     remaining_features = allfeatures.copy()
 
-    best_metric = 0
     thres = 0.01
+    best_metric = 0
+    best_model = None
     while True:
         new_metric = 0
-        new_b = None
+        new_model = None
         new_feature = None
         for feature in remaining_features:
             # Fit
             fit_features = selected_features + [feature]
-            b = linreg(target_name, dft, fit_features, verbose)
-            if b is None:
+            model = linreg(target_name, dft, fit_features, verbose)
+            if model is None:
                 continue
             else:
-                # Validation
-                Xv = dfv.loc[dfv.valid, fit_features].copy()
+                Xv = dfv.loc[dfv.valid, fit_features]
                 yv = dfv.loc[dfv.valid, target_name]
-                Xv['const'] = 1
-                yhatv = Xv @ b
+                yhatv = pd.Series(model.predict(Xv), index=yv.index)
+
+                # Validation
                 r2 = 1 - np.var(yv - yhatv) / np.var(yv)
                 rmse = -1e4*(((yv - yhatv)**2).mean()**.5)
                 ev = 1e4*(.5*yv[yhatv > yhatv.quantile(0.99)].mean() - .5*yv[yhatv < yhatv.quantile(0.01)].mean())
@@ -642,7 +646,7 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
                 metric_val = r2 if metric == 'r2' else rmse if metric == 'rmse' else ev if metric == 'ev' else 0
                 if metric_val > new_metric and (metric_val - best_metric) > abs(best_metric) * thres:
                     new_metric = metric_val
-                    new_b = b
+                    new_model = model
                     new_feature = feature
 
                 if verbose:
@@ -654,14 +658,13 @@ def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=No
             print(f'Selected {new_feature} {metric}={new_metric:.4f}')
             sys.stdout.flush()
             best_metric = new_metric
-            best_b = new_b
+            best_model = new_model
             selected_features.append(new_feature)
             remaining_features.remove(new_feature)
 
     print(f'Selected features: {selected_features}')
     sys.stdout.flush()
-    model = BasicLinearModel(selected_features, best_b)
-    return model
+    return best_model
 
 def linreg(target_name, dft, fit_features, verbose=False):
     '''
@@ -670,23 +673,12 @@ def linreg(target_name, dft, fit_features, verbose=False):
     Returns:
         Linear regression coefficients.
     '''
-    X = dft.loc[dft.valid, fit_features].copy()
+    X = dft.loc[dft.valid, fit_features] # this will be copied inside LinearRegression
     y = dft.loc[dft.valid, target_name]
-    X['const'] = 1
 
-    # Fit
-    b = None
-    try:
-        b = (np.linalg.inv(X.T @ X) @ X.T @ y).array
-    except:
-        print('Failed: ', fit_feature)
-        if verbose:
-            print(dft.shape, X.shape, y.shape)
-            print(dft.columns.tolist())
-            print(dft.valid.sum())
-            print(fit_features)
-
-    return b
+    model = LinearRegression()
+    model.fit(X, y)
+    return model
 
 def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
         features=None, verbose=False, debug_nfeature=None):
@@ -778,10 +770,10 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
     selected_features = model.feature_names_in_ if hasattr(model, 'feature_names_in_') else model.feature_names_ if hasattr(model, 'feature_names_') else None
 
     if model is not None:
-        dfo = read_features(dto, dte, feature_dir, selected_features+[fitpar['target_name']])
+        dfo = read_features(dto, dte, feature_dir, list(selected_features) + [fitpar['target_name']])
         if dfo is not None and dfo.shape[0] > 0:
             Xo = dfo[selected_features].copy()
-            pred = model.predict(Xo)
+            pred = pd.Series(model.predict(Xo), index=Xo.index)
 
             oos_target = dfo[fitpar['target_name']].rename('target')
             if 'prior_fit' in fitpar:
