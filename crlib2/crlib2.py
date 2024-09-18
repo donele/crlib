@@ -901,8 +901,8 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
             return dfo
     return None
 
-def rolling_oos_linear(par, fitpar, st, et, metric='r2', feature_groups=None,
-        features=None, debug_nfeature=None):
+def rolling_oos(par, fitpar, st, et, metric='r2', feature_groups=None,
+        features=None, debug_nfeature=None, oos_func=oos_linear):
     '''
     Performs fitting with rolling window between st and et.
 
@@ -915,7 +915,7 @@ def rolling_oos_linear(par, fitpar, st, et, metric='r2', feature_groups=None,
     while(dte <= et):
         print(dtt, dtv, dto, dte)
         sys.stdout.flush()
-        dfo = oos_linear(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
+        dfo = oos_func(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
                 features=features, debug_nfeature=debug_nfeature)
         if dfo is not None:
             dfo_list.append(dfo)
