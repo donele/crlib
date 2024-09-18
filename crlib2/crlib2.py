@@ -238,14 +238,16 @@ def get_returns(df, sample_timex, max_timex, varname, returns_func):
         serdict[ser.name] = ser
 
     for ri in range(max_timex - 2):
-        rj = ri + 1
         ai = ri + sample_timex
-        aj = rj + sample_timex
-        name1 = f'{varname}_{ai}'
-        name2 = f'{varname}_{aj}'
-        ser = serdict[name2] - serdict[name1]
-        ser.name = f'diff_{varname}_{ai}_{aj}'
-        serdict[ser.name] = ser
+        for rj in range(ri + 1, max_timex - 1):
+            if varname == 'ret' and rj > ri + 1:
+                continue
+            aj = rj + sample_timex
+            name1 = f'{varname}_{ai}'
+            name2 = f'{varname}_{aj}'
+            ser = serdict[name2] - serdict[name1]
+            ser.name = f'diff_{varname}_{ai}_{aj}'
+            serdict[ser.name] = ser
 
     serlist = list(serdict.values())
     return serlist
@@ -556,9 +558,9 @@ def plot_test_features(dff):
     dff[tarcols].hist(figsize=(16,2*ny), bins=80)
     dff[tarcols].hist(figsize=(16,2*ny), bins=80, log=True)
 
-    feature_groups = ['ret_', 'medqimb_', 'qimax_', 'hilo_', 'diff_sum_avg_qty_', 'diff_sum_net_qty_']
+    feature_groups = ['ret', 'medqimb', 'qimax', 'hilo', 'diff_sum_avg_qty', 'diff_sum_net_qty']
     for fg in feature_groups:
-        cols = [x for x in dff.columns if x.startswith(fg)]
+        cols = [x for x in dff.columns if x.startswith(fg+'_')]
         dff[cols].hist(figsize=(16,12), bins=40)
 
         plt.figure(figsize=(16,4))
@@ -579,7 +581,8 @@ def plot_test_features(dff):
 
 ## Fitting
 
-def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=None, min_data_cnt=10):
+def select_features_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
+        verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
     Select feaures recursively using validation sample.
 
@@ -592,8 +595,12 @@ def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=
         or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
         return selected_features, best_b
 
-    allfeatures = [x for x in dft.columns if x.startswith('ret_') or x.startswith('medqimb_')
-                or x.startswith('qimax_') or x.startswith('hilo')]
+    if feature_groups is None:
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo']
+
+    #allfeatures = [x for x in dft.columns if x.startswith('ret_') or x.startswith('medqimb_')
+                #or x.startswith('qimax_') or x.startswith('hilo')]
+    allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
     if not debug_nfeature is None:
         allfeatures = allfeatures[:min(len(allfeatures), debug_nfeature)]
 
@@ -601,10 +608,10 @@ def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=
 
     remaining_features = allfeatures.copy()
 
-    best_r2 = 0
-    thres = 1.01
+    best_metric = 0
+    thres = 0.01
     while True:
-        new_r2 = 0
+        new_metric = 0
         new_b = None
         new_feature = None
         for feature in remaining_features:
@@ -620,22 +627,25 @@ def select_features_linear(target_name, dft, dfv, verbose=False, debug_nfeature=
                 Xv['const'] = 1
                 yhatv = Xv @ b
                 r2 = 1 - np.var(yv - yhatv) / np.var(yv)
+                rmse = -1e4*(((yv - yhatv)**2).mean()**.5)
+                ev = 1e4*(.5*yv[yhatv > yhatv.quantile(0.99)].mean() - .5*yv[yhatv < yhatv.quantile(0.01)].mean())
 
                 # Check if new best is found
-                if r2 > new_r2 and r2 > best_r2*thres:
-                    new_r2 = r2
+                metric_val = r2 if metric == 'r2' else rmse if metric == 'rmse' else ev if metric == 'ev' else 0
+                if metric_val > new_metric and (metric_val - best_metric) > abs(best_metric) * thres:
+                    new_metric = metric_val
                     new_b = b
                     new_feature = feature
 
                 if verbose:
-                    print(f'{fit_features} r2 {r2:.4f} old_best {best_r2} new_best {new_r2:.4f}')
+                    print(f'{fit_features} r2={r2:.4f} rmse={rmse:.4f}, ev={ev:.4f}')
 
         if new_feature is None:
             break
         else:
-            print(f'Selected {new_feature} r2 {new_r2:.4f}')
+            print(f'Selected {new_feature} {metric}={new_metric:.4f}')
             sys.stdout.flush()
-            best_r2 = new_r2
+            best_metric = new_metric
             best_b = new_b
             selected_features.append(new_feature)
             remaining_features.remove(new_feature)
@@ -669,8 +679,8 @@ def linreg(target_name, dft, fit_features, verbose=False):
 
     return b
 
-def train_linear(target_name, dft, dfv,
-                 features=None, verbose=False, debug_nfeature=None):
+def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
+        features=None, verbose=False, debug_nfeature=None):
     '''
     Performs a linear regression with a fixed feature set, or by selecting
     features recursively.
@@ -681,11 +691,33 @@ def train_linear(target_name, dft, dfv,
     selected_features = None
     best_b = None
     if features is None: # select features with validation data.
-        selected_features, best_b = select_features_linear(target_name, dft, dfv, verbose, debug_nfeature)
+        selected_features, best_b = select_features_linear(target_name, dft, dfv, metric,
+                feature_groups=feature_groups,
+                verbose=verbose, debug_nfeature=debug_nfeature)
     else:
         if dfv.shape[0] > 0: # feature set is fixed.
             selected_features = features
             best_b = linreg(target_name, dft, features, verbose)
+    return selected_features, best_b
+
+def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
+                 features=None, verbose=False, debug_nfeature=None):
+    '''
+    Performs a boosted tree regression with a fixed feature set, or by selecting
+    features recursively.
+
+    Returns:
+        List of the selected features and the regression coefficients.
+    '''
+    selected_features = None
+    best_b = None
+    if features is None: # select features with validation data.
+        #selected_features, best_b = select_features_linear(target_name, dft, dfv, verbose, debug_nfeature)
+        pass
+    else:
+        if dfv.shape[0] > 0: # feature set is fixed.
+            selected_features = features
+            #best_b = linreg(target_name, dft, features, verbose)
     return selected_features, best_b
 
 def get_dts(st, fit_window, val_window, oos_window):
@@ -701,7 +733,18 @@ def get_dts(st, fit_window, val_window, oos_window):
     dte = dto + timedelta(hours=oos_window)
     return dtv, dto, dte
 
-def oos_linear(par, fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=None, do_write_pred=True):
+def oos_linear(par, fitpar, dtt, dtv, dto, dte, metric='r2', feature_groups=None,
+        features=None, verbose=False, debug_nfeature=None, do_write_pred=True):
+    return oos(par, fitpar, dtt, dtv, dto, dte, fit_func=train_linear, metric=metric, feature_groups=feature_groups,
+            features=features, verbose=verbose, debug_nfeature=debug_nfeature, do_write_pred=do_write_pred)
+
+def oos_tree(par, fitpar, dtt, dtv, dto, dte, metric='rmse', feature_groups=None,
+        features=None, verbose=False, debug_nfeature=None, do_write_pred=True):
+    return oos(par, fitpar, dtt, dtv, dto, dte, fit_func=train_tree, metric=metric, feature_groups=feature_groups,
+            features=features, verbose=verbose, debug_nfeature=debug_nfeature, do_write_pred=do_write_pred)
+
+def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=None,
+        features=None, verbose=False, debug_nfeature=None, do_write_pred=True):
     '''
     Performs fitting with the specified train, validate, and out-of-sample dates.
 
@@ -722,8 +765,10 @@ def oos_linear(par, fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=No
         dft['TAR'] -= train_prior_pred
         dfv['TAR'] -= valid_prior_pred
 
-    selected_features, best_b = train_linear('TAR', dft, dfv,
-                                             features, verbose=False, debug_nfeature=debug_nfeature)
+    selected_features, best_b = fit_func(
+            'TAR', dft, dfv, metric=metric, feature_groups=feature_groups,
+            features=features, verbose=verbose, debug_nfeature=debug_nfeature)
+
     if best_b is not None:
         dfo = read_features(dto, dte, feature_dir, selected_features+[fitpar['target_name']])
         if dfo is not None and dfo.shape[0] > 0:
@@ -746,7 +791,8 @@ def oos_linear(par, fitpar, dtt, dtv, dto, dte, features=None, debug_nfeature=No
             return dfo
     return None
 
-def rolling_oos_linear(par, fitpar, st, et, features=None, debug_nfeature=None):
+def rolling_oos_linear(par, fitpar, st, et, metric='r2', feature_groups=None,
+        features=None, debug_nfeature=None):
     '''
     Performs fitting with rolling window between st and et.
 
@@ -759,7 +805,8 @@ def rolling_oos_linear(par, fitpar, st, et, features=None, debug_nfeature=None):
     while(dte <= et):
         print(dtt, dtv, dto, dte)
         sys.stdout.flush()
-        dfo = oos_linear(par, fitpar, dtt, dtv, dto, dte, features, debug_nfeature)
+        dfo = oos_linear(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
+                features=features, debug_nfeature=debug_nfeature)
         if dfo is not None:
             dfo_list.append(dfo)
 
@@ -895,7 +942,8 @@ def get_pnl(dfo, target_name, feebp):
 
     pnl.name = (feebp, 'pnl')
     position.name = (feebp, 'pos')
-    return pnl, position
+    entry.name = (feebp, 'entry')
+    return pnl, position, entry
 
 def get_aggpnl(pnl):
     '''
@@ -926,9 +974,10 @@ def get_pnls(dfo, target_name, feebp_list):
     cols = []
     aggcols = []
     for feebp in feebp_list:
-        pnl, pos = get_pnl(dfo, target_name, feebp)
+        pnl, pos, entry = get_pnl(dfo, target_name, feebp)
         cols.append(pnl)
         cols.append(pos)
+        cols.append(entry)
 
         aggpnl = get_aggpnl(pnl)
         aggcols.append(aggpnl)
@@ -987,6 +1036,7 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         df = dfpnl[feebp]
         pos = df['pos']
         pnl = df['pnl']
+        entry = df['entry']
 
         ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
 
@@ -1008,6 +1058,8 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
         d_volume = (pos - pos.shift()).abs().sum()/ndays # daily volume
         d_pnl = pnl.sum() / ndays
         d_shrp = get_daily_sharpe(pnl)
+
+        sig_rat = entry[entry].sum() / len(entry)
 
         dft = df.groupby((df.pos.shift() != df.pos).cumsum()).agg(
             pos=('pos', 'mean'), pnl=('pnl', lambda x: x.sum()))
@@ -1042,9 +1094,10 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
             bias = round(biaspct, 2),
             mbias = round(mbiaspct, 2),
             d_volume = round(d_volume, 1),
-            d_pnl = round(d_pnl, 1),
+            d_pnl = round(d_pnl, 3),
             d_shrp = round(d_shrp, 2),
 
+            sig_rat = round(sig_rat, 2),
             w_rat = round(w_rat, 2),
             bw_rat = round(bw_rat, 2),
             sw_rat = round(sw_rat, 2),
@@ -1066,7 +1119,7 @@ def basic_cols():
        'd_volume', 'd_pnl', 'd_shrp']
 
 def detail_cols():
-    return ['w_rat', 'bw_rat', 'sw_rat', 'gpt', 'b_gpt', 's_gpt', 'w_mean', 'w_std',
+    return ['sig_rat', 'w_rat', 'bw_rat', 'sw_rat', 'gpt', 'b_gpt', 's_gpt', 'w_mean', 'w_std',
        'l_mean', 'l_std']
 
 def print_markdown(dftrdsumm):
