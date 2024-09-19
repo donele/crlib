@@ -5,11 +5,13 @@ import matplotlib.dates as mdates
 import os
 import sys
 import glob
+import pickle
 import datetime
 import seaborn as sns
 import yaml
 from datetime import timedelta
 from math import *
+from dataclasses import dataclass
 
 import lightgbm as lgb
 from sklearn.linear_model import LinearRegression
@@ -700,20 +702,29 @@ def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
 
 ## Tree fitting
 
-def lgbreg(target_name, dft, dfv, features, max_depth=None, num_leaves=None,
-        min_child_samples=None, n_estimators=40, verbose=False):
-    X = dft.loc[dft.valid, features]
-    y = dft.loc[dft.valid, target_name]
+@dataclass
+class LGBParam:
+    use_data_pct: int
+    max_depth: int
+    num_leaves: int
+    min_child_samples: int
+    n_estimators: int = 100
+
+def lgbreg(target_name, dft, dfv, features, lgbparam, lgbverbose=False):
+    use_data_len = len(dft) * lgbparam.use_data_pct // 100
+    X = dft.iloc[-use_data_len:].loc[dft.valid, features]
+    y = dft.iloc[-use_data_len:].loc[dft.valid, target_name]
     Xv = dfv.loc[dfv.valid, features]
     yv = dfv.loc[dfv.valid, target_name]
 
-    verbosity = 1 if verbose else -1
+    verbosity = 1 if lgbverbose else -1
     reg_par = {
         'metric': 'rmse',
-        'n_estimators': n_estimators,
-        'max_depth': max_depth,
-        'num_leaves': num_leaves,
-        'min_child_samples': min_child_samples,
+        'n_estimators': lgbparam.n_estimators,
+        'max_depth': lgbparam.max_depth,
+        'num_leaves': lgbparam.num_leaves,
+        'min_child_samples': lgbparam.min_child_samples,
+        'force_row_wise': True,
         'verbosity': verbosity,
     }
     fit_par = {
@@ -748,51 +759,52 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
     print(f'Total {len(allfeatures)} features: {allfeatures}')
 
     n_rep = 18
-    n_sim = 100
+    n_sim = 50
     selection_early_stop = True
 
     max_best_va = 0
+    udp_range = [10, 100]
     mxd_range = [2, 7]
     nl_range = [10, 100]
     mcs_exp_range = [6, 14]
 
     final_model = None
-    va_list = []
     score_list = []
-    dflist = []
     features = allfeatures.copy()
     for irep in range(n_rep):
-        if verbose:
-            print(f'Starting.. features={features}')
-            print(f'mxd: {mxd_range} nl: {nl_range} mcs: {mcs_exp_range}')
+        print(f'Starting rep {irep}. udp: {udp_range}, mxd: {mxd_range}, nl: {nl_range}, mcs: {mcs_exp_range}')
 
-        for _ in range(n_sim):
+        for isim in range(n_sim):
+            udp = np.random.randint(*udp_range)
             mxd = np.random.randint(*mxd_range)
             nl = np.random.randint(*nl_range)
             mcs = int(2**np.random.uniform(*mcs_exp_range))
-            model = lgbreg(target_name, dft, dfv, features,
-                    max_depth=mxd, num_leaves=nl, min_child_samples=mcs, verbose=verbose)
+
+            lgbparam = LGBParam(udp, mxd, nl, mcs)
+            model = lgbreg(target_name, dft, dfv, features, lgbparam)
 
             Xv = dfv.loc[dfv.valid, features]
             yv = dfv.loc[dfv.valid, target_name]
             valid_score = model.score(Xv, yv)
+            if verbose:
+                print(f'[{isim}]{valid_score:.4f} ', end='')
             dfimportance = pd.DataFrame({'name': model.feature_name_, 'importance': model.feature_importances_})
-            score_list.append([mxd, nl, mcs, valid_score, dfimportance, model])
+            score_list.append([udp, mxd, nl, mcs, valid_score, dfimportance, model])
+        if verbose:
+            print(f'\n', end='')
 
-        df0 = pd.DataFrame(data=score_list, columns=['mxd', 'nl', 'mcs', 'va', 'imp', 'model'])
+        df0 = pd.DataFrame(data=score_list, columns=['udp', 'mxd', 'nl', 'mcs', 'va', 'imp', 'model'])
         if irep % 2 == 0:
             df1 = df0.loc[df0.va >= df0.va.quantile(0.9)]
+            udp_range = [max(5, int(df1.udp.min()) - 10), min(100, int(df1.udp.max()) + 10)]
             mxd_range = [max(2, int(df1.mxd.min()) - 1), int(df1.mxd.max()) + 2]
             nl_range = [max(2, int(df1.nl.min()) - 1), int(df1.nl.max()) + 2]
             mcs_exp_range = [int(np.log2(df1.mcs.min())) - 1, int(np.log2(df1.mcs.max())) + 1]
         else:
-            dflist.append(df0)
             df0 = df0.sort_values(by='va')
             best_row = df0.iloc[-1]
             best_va = best_row.va
-            va_list.append(best_va)
-            if verbose:
-                print(f'best n: {best_row.n} mxd: {best_row.mxd} nl: {best_row.nl} mcs: {best_row.mcs} va: {best_row.va:.4}')
+            print(f'best udp: {best_row.udp}, mxd: {best_row.mxd}, nl: {best_row.nl}, mcs: {best_row.mcs}, va: {best_row.va:.4}\n')
 
             if best_va > max_best_va:
                 max_best_va = best_va;
@@ -804,11 +816,11 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
 
             dfimp = df0.iloc[-1]['imp']
             dfimp = dfimp.sort_values(by='importance')
-            features = dfimp.iloc[len(dfimp)//3:]['name'].tolist()
+            features = dfimp.iloc[-int(len(dfimp)*2/3):]['name'].tolist()
+            if verbose:
+                print(f'Reduced {len(features)} features: {features}')
             score_list = []
 
-    if verbose:
-        print(f'Selected features: {selected_features}')
     return final_model
 
 def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
@@ -898,11 +910,12 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
 
             if do_write_pred:
                 write_pred(dfo, par, fitpar)
+            write_model(model, dto, par, fitpar)
             return dfo
     return None
 
 def rolling_oos(par, fitpar, st, et, metric='r2', feature_groups=None,
-        features=None, debug_nfeature=None, oos_func=oos_linear):
+        features=None, verbose=False, debug_nfeature=None, oos_func=oos_linear):
     '''
     Performs fitting with rolling window between st and et.
 
@@ -913,10 +926,10 @@ def rolling_oos(par, fitpar, st, et, metric='r2', feature_groups=None,
     dtt = st
     dtv, dto, dte = get_dts(st, fitpar['fit_window'], fitpar['val_window'], fitpar['oos_window'])
     while(dte <= et):
-        print(dtt, dtv, dto, dte)
+        print(f'train: {dtt}-, validate: {dtv}-, oos: {dto}-{dte}')
         sys.stdout.flush()
         dfo = oos_func(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
-                features=features, debug_nfeature=debug_nfeature)
+                features=features, verbose=verbose, debug_nfeature=debug_nfeature)
         if dfo is not None:
             dfo_list.append(dfo)
 
@@ -933,6 +946,12 @@ def get_pred_dir_from_name(par, fit_name):
         os.makedirs(pred_dir)
     return pred_dir
 
+def get_model_dir_from_name(par, fit_name):
+    model_dir = f'{get_fit_dir(par)}/{fit_name}/model'
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+    return model_dir
+
 def get_pred_dir(par, fitpar):
     fit_name = fitpar['target_name']
     if 'fit_desc' in fitpar and fitpar['fit_desc'] != '':
@@ -941,16 +960,33 @@ def get_pred_dir(par, fitpar):
     pred_dir = get_pred_dir_from_name(par, fit_name)
     return pred_dir
 
+def get_model_dir(par, fitpar):
+    fit_name = fitpar['target_name']
+    if 'fit_desc' in fitpar and fitpar['fit_desc'] != '':
+        fit_name += '.' + fitpar['fit_desc']
+
+    model_dir = get_model_dir_from_name(par, fit_name)
+    return model_dir
+
 def get_pred_path(dt1, dt2, par, fitpar):
     pred_dir = get_pred_dir(par, fitpar)
     path = f'{pred_dir}/pred.{get_idate(dt1)}.{get_idate(dt2)}.parquet'
+    return path
+
+def get_model_path(dt, par, fitpar):
+    model_dir = get_model_dir(par, fitpar)
+    path = f'{model_dir}/model.{get_idate(dt)}.{dt.hour:02}{dt.minute:02}.parquet'
     return path
 
 def write_pred(dfo, par, fitpar):
     path = get_pred_path(dfo.index[0], dfo.index[-1], par, fitpar)
     dfo.to_parquet(path)
     print(f'oos pred written to {path}')
-    return
+
+def write_model(model, dt, par, fitpar):
+    path = get_model_path(dt, par, fitpar)
+    with open(path, 'wb') as file:
+        pickle.dump(model, file)
 
 def read_pred(par, fitpar, st, et):
     return read_pred_from_dir(get_pred_dir(par, fitpar), st, et)
