@@ -529,7 +529,7 @@ def write_feature(dt, par):
         df0.to_parquet(f'{feature_dir}/{yyyymmdd}.{hh:02d}.parquet')
     return df0.shape if df0 is not None else None
 
-def read_features(dt1, dt2, feature_dir, features=None):
+def read_features(dt1, dt2, feature_dir, columns=None):
     '''
     Reads the features data in the time range between dt1 and dt2.
 
@@ -546,13 +546,16 @@ def read_features(dt1, dt2, feature_dir, features=None):
         if not os.path.exists(path):
             print(path, ' not found.')
             continue
-        df = pd.read_parquet(path, columns=features)
+        df = pd.read_parquet(path, columns=columns)
         if df is not None and df.shape[0] > 0:
             dflist.append(df)
     if len(dflist) > 0:
         df = pd.concat(dflist)
         return df
     return None
+
+def read_oos(st, et, fitpar):
+    return read_features(st, et, fitpar['feature_dir'], columns=['mid', 'adj_width', 'valid', fitpar['target_name']])
 
 def plot_test_features(dff):
     tarcols = [x for x in dff.columns if x.startswith('tar')]
@@ -727,10 +730,11 @@ def lgbreg(target_name, dft, dfv, features, lgbparam, lgbverbose=False):
         'force_row_wise': True,
         'verbosity': verbosity,
     }
+    eval_period = 1 if lgbverbose else 0
     fit_par = {
         'eval_set': [(X, y), (Xv, yv)],
         'eval_names': ['train', 'valid'],
-        'callbacks': [lgb.early_stopping(stopping_rounds=3, verbose=0), lgb.log_evaluation(period=0)],
+        'callbacks': [lgb.early_stopping(stopping_rounds=3, verbose=0), lgb.log_evaluation(period=eval_period)],
     }
     model = lgb.LGBMRegressor(**reg_par)
     model.fit(X, y, **fit_par)
@@ -759,7 +763,7 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
     print(f'Total {len(allfeatures)} features: {allfeatures}')
 
     n_rep = 18
-    n_sim = 50
+    n_sim = 20
     selection_early_stop = True
 
     max_best_va = 0
@@ -774,24 +778,24 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
     for irep in range(n_rep):
         print(f'Starting rep {irep}. udp: {udp_range}, mxd: {mxd_range}, nl: {nl_range}, mcs: {mcs_exp_range}')
 
-        for isim in range(n_sim):
+        rep_n_sim = n_sim if irep % 2 == 0 else int(n_sim / 2)
+        for isim in range(rep_n_sim):
             udp = np.random.randint(*udp_range)
             mxd = np.random.randint(*mxd_range)
             nl = np.random.randint(*nl_range)
             mcs = int(2**np.random.uniform(*mcs_exp_range))
 
             lgbparam = LGBParam(udp, mxd, nl, mcs)
-            model = lgbreg(target_name, dft, dfv, features, lgbparam)
+            model = lgbreg(target_name, dft, dfv, features, lgbparam, verbose)
 
             Xv = dfv.loc[dfv.valid, features]
             yv = dfv.loc[dfv.valid, target_name]
             valid_score = model.score(Xv, yv)
-            if verbose:
-                print(f'[{isim}]{valid_score:.4f} ', end='')
+            print(f'[{isim}]{valid_score:.4f} ', end='')
+                sys.stdout.flush()
             dfimportance = pd.DataFrame({'name': model.feature_name_, 'importance': model.feature_importances_})
             score_list.append([udp, mxd, nl, mcs, valid_score, dfimportance, model])
-        if verbose:
-            print(f'\n', end='')
+        print(f'\n', end='')
 
         df0 = pd.DataFrame(data=score_list, columns=['udp', 'mxd', 'nl', 'mcs', 'va', 'imp', 'model'])
         if irep % 2 == 0:
@@ -817,8 +821,7 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
             dfimp = df0.iloc[-1]['imp']
             dfimp = dfimp.sort_values(by='importance')
             features = dfimp.iloc[-int(len(dfimp)*2/3):]['name'].tolist()
-            if verbose:
-                print(f'Reduced {len(features)} features: {features}')
+            print(f'Reduced {len(features)} features: {features}')
             score_list = []
 
     return final_model
@@ -893,7 +896,7 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
     selected_features = model.feature_names_in_ if hasattr(model, 'feature_names_in_') else model.feature_names_ if hasattr(model, 'feature_names_') else None
 
     if model is not None:
-        dfo = read_features(dto, dte, feature_dir, list(selected_features) + [fitpar['target_name']])
+        dfo = read_features(dto, dte, feature_dir, columns=list(selected_features) + [fitpar['target_name']])
         if dfo is not None and dfo.shape[0] > 0:
             Xo = dfo[selected_features].copy()
             pred = pd.Series(model.predict(Xo), index=Xo.index)
