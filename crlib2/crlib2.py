@@ -554,8 +554,12 @@ def read_features(dt1, dt2, feature_dir, columns=None):
         return df
     return None
 
-def read_oos(st, et, fitpar):
-    return read_features(st, et, fitpar['feature_dir'], columns=['mid', 'adj_width', 'valid', fitpar['target_name']])
+def read_oos(st, et, par, fitpar):
+    dfp = read_pred(par, fitpar, st, et)
+    dfo = read_features(st, et, fitpar['feature_dir'], columns=[
+        'mid', 'adj_width', 'valid', 'tsince_trade', fitpar['target_name']])
+    dfo['pred'] = dfp.totpred
+    return dfo
 
 def plot_test_features(dff):
     tarcols = [x for x in dff.columns if x.startswith('tar')]
@@ -792,7 +796,7 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
             yv = dfv.loc[dfv.valid, target_name]
             valid_score = model.score(Xv, yv)
             print(f'[{isim}]{valid_score:.4f} ', end='')
-                sys.stdout.flush()
+            sys.stdout.flush()
             dfimportance = pd.DataFrame({'name': model.feature_name_, 'importance': model.feature_importances_})
             score_list.append([udp, mxd, nl, mcs, valid_score, dfimportance, model])
         print(f'\n', end='')
@@ -808,7 +812,7 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
             df0 = df0.sort_values(by='va')
             best_row = df0.iloc[-1]
             best_va = best_row.va
-            print(f'best udp: {best_row.udp}, mxd: {best_row.mxd}, nl: {best_row.nl}, mcs: {best_row.mcs}, va: {best_row.va:.4}\n')
+            print(f'best udp: {best_row.udp}, mxd: {best_row.mxd}, nl: {best_row.nl}, mcs: {best_row.mcs}, va: {best_row.va:.4}')
 
             if best_va > max_best_va:
                 max_best_va = best_va;
@@ -893,6 +897,8 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
     model = fit_func(
             'TAR', dft, dfv, metric=metric, feature_groups=feature_groups,
             features=features, verbose=verbose, debug_nfeature=debug_nfeature)
+    del dft
+    del dfv
     selected_features = model.feature_names_in_ if hasattr(model, 'feature_names_in_') else model.feature_names_ if hasattr(model, 'feature_names_') else None
 
     if model is not None:
@@ -914,8 +920,9 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
             if do_write_pred:
                 write_pred(dfo, par, fitpar)
             write_model(model, dto, par, fitpar)
-            return dfo
-    return None
+        del dfo
+            #return dfo
+    #return None
 
 def rolling_oos(par, fitpar, st, et, metric='r2', feature_groups=None,
         features=None, verbose=False, debug_nfeature=None, oos_func=oos_linear):
@@ -925,22 +932,23 @@ def rolling_oos(par, fitpar, st, et, metric='r2', feature_groups=None,
     Returns:
         Out of sample prediction.
     '''
-    dfo_list = []
+    #dfo_list = []
     dtt = st
     dtv, dto, dte = get_dts(st, fitpar['fit_window'], fitpar['val_window'], fitpar['oos_window'])
     while(dte <= et):
         print(f'train: {dtt}-, validate: {dtv}-, oos: {dto}-{dte}')
         sys.stdout.flush()
-        dfo = oos_func(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
+        #dfo = oos_func(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
+        oos_func(par, fitpar, dtt, dtv, dto, dte, metric=metric, feature_groups=feature_groups,
                 features=features, verbose=verbose, debug_nfeature=debug_nfeature)
-        if dfo is not None:
-            dfo_list.append(dfo)
+        #if dfo is not None:
+        #    dfo_list.append(dfo)
 
         dtt = dtt + timedelta(hours=fitpar['oos_window'])
         dtv, dto, dte = get_dts(dtt, fitpar['fit_window'], fitpar['val_window'], fitpar['oos_window'])
-    if len(dfo_list) > 0:
-        dfoall = pd.concat(dfo_list)
-        return dfoall
+    #if len(dfo_list) > 0:
+    #    dfoall = pd.concat(dfo_list)
+    #    return dfoall
     return None
 
 def get_pred_dir_from_name(par, fit_name):
@@ -1018,23 +1026,23 @@ def read_pred_from_dir(pred_dir, st, et):
         return None
     return dfo
 
-def plot_target_prediction(dfo):
+def plot_target_prediction(dfo, target_name='target'):
     plt.figure(figsize=(12,4))
     ax = plt.subplot(1, 2, 1)
-    plot_target_prediction_nquantiles(dfo, n=100, ax=ax)
+    plot_target_prediction_nquantiles(dfo, target_name, n=100, ax=ax)
     ax = plt.subplot(1, 2, 2)
-    plot_target_prediction_errorbar(dfo, ax=ax)
+    plot_target_prediction_errorbar(dfo, target_name, ax=ax)
     plt.tight_layout()
 
-def plot_target_prediction_nquantiles(dfo, n=100, ax=None):
+def plot_target_prediction_nquantiles(dfo, target_name='target', n=100, ax=None):
     '''
     Plots target vs prediciton in 100 prediction quantiles.
     '''
     if ax is None:
         plt.figure()
-    corr = dfo.totpred.corr(dfo.target)
+    corr = dfo.totpred.corr(dfo[target_name])
     qc = pd.qcut(dfo.totpred, n, duplicates='drop')
-    tarpred = dfo.groupby(qc).target.mean()
+    tarpred = dfo.groupby(qc)[target_name].mean()
     mean_preds = dfo.groupby(qc).totpred.mean()
     plt.plot(mean_preds, tarpred, label=f'corr {corr:.4f}')
     plt.title('target vs prediction (out-of-sample)')
@@ -1043,7 +1051,7 @@ def plot_target_prediction_nquantiles(dfo, n=100, ax=None):
     plt.grid()
     plt.legend()
 
-def plot_target_prediction_errorbar(dfo, ax=None):
+def plot_target_prediction_errorbar(dfo, target_name='target', ax=None):
     '''
     Plots target vs prediction in 13 quantiles of varying sizes.
     '''
@@ -1051,7 +1059,7 @@ def plot_target_prediction_errorbar(dfo, ax=None):
         plt.figure()
     bc = pd.cut(dfo.totpred, dfo.totpred.quantile([0, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.68, 0.84, 0.92, 0.96, 0.98, 0.99, 1]),
                duplicates='drop')
-    bcgrp = dfo.groupby(bc).target.agg(['mean', 'std'])
+    bcgrp = dfo.groupby(bc)[target_name].agg(['mean', 'std'])
     bcx = dfo.groupby(bc).totpred.mean()
     plt.errorbar(bcx, bcgrp['mean'], yerr=bcgrp['std'], fmt='o', capsize=5)
     plt.title('target vs prediction w/ error bars')
@@ -1165,6 +1173,11 @@ def plot_pnl(dfpnl):
     plt.xticks(rotation=20)
     plt.grid()
     plt.legend()
+
+def get_holding_summary(dfpnl, dfo):
+
+
+    pass
 
 def get_trade_summary(dfpnl, dfo=None, target_name=None):
     '''
