@@ -11,3 +11,4 @@ packages = ['crlib', 'crlib2']
 
 [project.scripts]
 fit1d = "crlib2:fit1d"
+write_features = "crlib2:write_features"
