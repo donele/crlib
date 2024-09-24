@@ -1,6 +1,8 @@
 import argparse
 import datetime
 import multiprocessing as mp
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 from crlib2 import *
 from crlib2.crfeatures import *
