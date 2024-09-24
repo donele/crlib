@@ -13,15 +13,13 @@ def fit1d():
     parser.add_argument('-d', '--day', type=int, required=True, help='Day')
 
     a = parser.parse_args()
-    print(a.target)
-    print(a.fit_algo)
 
     par = read_params('params.yaml')
     print(par)
     
     fitpar = {
         'target_name': a.target,
-        'fit_desc': f'script_{a.fit_algo}{a.fit_window}{a.val_window}{a.oos_window}',
+        'fit_desc': f'{a.fit_algo}{a.fit_window}{a.val_window}{a.oos_window}',
         'feature_dir': get_feature_dir(par),
     }
     print(fitpar)
