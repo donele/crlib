@@ -35,14 +35,14 @@ def get_feature_dir(par, basedir='/home/jdlee'):
     exch = par['product'][0]
     sym = par['product'][1]
     pname = par['proj_name']
-    feature_dir = f'{basedir}/crfeature/{exch}.{sym}.{pname}'
+    feature_dir = f'{basedir}/crfeature/{sym}.{exch}.{pname}'
     return feature_dir
 
 def get_fit_dir(par, basedir='/home/jdlee'):
     exch = par['product'][0]
     sym = par['product'][1]
     pname = par['proj_name']
-    fit_dir = f'{basedir}/crfit/{exch}.{sym}.{pname}'
+    fit_dir = f'{basedir}/crfit/{sym}.{exch}.{pname}'
     return fit_dir
 
 def get_pred_dir_from_name(par, fit_name):
@@ -57,10 +57,10 @@ def get_model_dir_from_name(par, fit_name):
         os.makedirs(model_dir)
     return model_dir
 
-def get_pred_dir(par, fitpar):
-    fit_name = fitpar['target_name']
-    if 'fit_desc' in fitpar and fitpar['fit_desc'] != '':
-        fit_name += '.' + fitpar['fit_desc']
+def get_pred_dir(par, target_name, fit_desc=''):
+    fit_name = target_name
+    if fit_desc != '':
+        fit_name += '.' + fit_desc
 
     pred_dir = get_pred_dir_from_name(par, fit_name)
     return pred_dir
