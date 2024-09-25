@@ -18,8 +18,6 @@ from crlib2.crfeatures import *
 from crlib2.crlinreg import *
 from crlib2.crtreereg import *
 
-## Data Hangling
-
 dfuniv = None
 upath = 'universe.csv'
 if os.path.exists(upath):
@@ -63,11 +61,17 @@ def get_timeindex(interval):
         timeindex = None
     return timeindex
 
-def read_oos(st, et, par, fitpar):
-    dfp = read_pred(par, fitpar, st, et)
-    dfo = read_features(st, et, fitpar['feature_dir'], columns=[
-        'mid', 'adj_width', 'valid', 'tsince_trade', fitpar['target_name']])
-    dfo['pred'] = dfp.totpred
+def read_oos(st, et, par, predpar):
+    dfo = read_features(st, et, get_feature_dir(par), columns=[
+        'mid', 'adj_width', 'valid', 'tsince_trade', predpar['target_name']])
+
+    pred_list = []
+    for t, d in zip(predpar['target_names'], predpar['fit_descs']):
+        dfp = read_pred(par, st, et, t, d)
+        pred_list.append(dfp.totpred)
+    weights = predpar['weights'] if 'weights' in predpar else [1] * len(pred_list)
+    dfo['pred'] = (pd.concat(pred_list, axis=1) * weights).sum(axis=1)
+
     return dfo
 
 def plot_test_features(dff):
@@ -121,7 +125,8 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
     Returns:
         Series of predictions.
     '''
-    feature_dir = fitpar['feature_dir']
+    #feature_dir = fitpar['feature_dir']
+    feature_dir = get_feature_dir(par)
     dft = read_features(dtt, dtv, feature_dir)
     dfv = read_features(dtv, dto, feature_dir)
     if dft is None or dfv is None or len(dft) < 1 or len(dfv) < 1:
@@ -228,8 +233,8 @@ def write_model(model, dt, par, fitpar):
     with open(path, 'wb') as file:
         pickle.dump(model, file)
 
-def read_pred(par, fitpar, st, et):
-    return read_pred_from_dir(get_pred_dir(par, fitpar), st, et)
+def read_pred(par, st, et, target_name, fit_desc=''):
+    return read_pred_from_dir(get_pred_dir(par, target_name, fit_desc), st, et)
 
 def read_pred_from_dir(pred_dir, st, et):
     idate1 = get_idate(st)
