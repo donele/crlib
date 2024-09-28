@@ -1,9 +1,8 @@
 import os
 
 crdata_map = {
-	'japan': {0: '/media/jdlee/bigdata1/crdata',
-             },
-    'default': {0: '/media/jdlee/bigdata1/crdata',
+    'default': {0: '/mnt/bigdata1/crdata',
+            20240701: '/mnt/bigdata2/crdata',
              },
 }
 
@@ -22,7 +21,7 @@ def get_data_dir(dt, locale):
     switchmap = crdata_map[locale] if locale in crdata_map else crdata_map['default']
     switchdate = 0
     for k, v in switchmap.items():
-        if k >= switchdate and k < yyyymmdd:
+        if k > switchdate and k <= yyyymmdd:
             switchdate = k
     disk = switchmap[switchdate]
 
