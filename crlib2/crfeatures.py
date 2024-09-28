@@ -103,8 +103,8 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     dftagg = dft.groupby(tgrp).agg(
         price=('price', 'last'),
         avg_price=('price', 'mean'),
-        min_price=('price', 'min'),
-        max_price=('price', 'max'),
+        min_price=('min_px', 'min'),
+        max_price=('max_px', 'max'),
         sum_avg_qty=('abs_qty', 'sum'),
         sum_net_qty=('net_qty', 'sum'),
         last_trade=('price', lambda x: x.index[-1]),
@@ -211,7 +211,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     ## Hilo
 
-    hllst = []
+    hilolst = []
     for ri in range(max_timex):
         w = 2**ri
         hiser = df.max_price.rolling(window=w, min_periods=1).max()
@@ -219,9 +219,9 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
         ai = ri + sample_timex
         hiser.name = f'max_price_{ai}'
         loser.name = f'min_price_{ai}'
-        hllst.append(hiser)
-        hllst.append(loser)
-    dfhl = pd.DataFrame(hllst).T
+        hilolst.append(hiser)
+        hilolst.append(loser)
+    dfhl = pd.DataFrame(hilolst).T
     for ri in range(max_timex):
         ai = ri + sample_timex
         hiname = f'max_price_{ai}'
@@ -273,61 +273,4 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     df = pd.concat([df] + serlst, axis=1)
     return df
-
-def get_features3(dt1, par, max_timex=None):
-    '''
-    Reads the data in three consecutive periods
-    '''
-    index_col = par['index_col'] if 'index_col' in par else None
-    mid_col = par['mid_col'] if 'mid_col' in par else None
-    sample_timex = par['sample_timex'] if 'sample_timex' in par else None
-
-    dt2 = dt1 + timedelta(hours=1)
-
-    dft = read3('trade', dt1, par)
-    dfb = read3('bbo', dt1, par)
-    dfm = read3('midpx', dt1, par)
-    if dft is None or dfb is None or dfm is None:
-        return None
-    df = get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex)
-    df = df.loc[dt1:(dt2 - timedelta(microseconds=1))]
-    return df
-
-def write_feature(dt, par):
-    df0 = get_features3(dt, par)
-    if df0 is not None and df0.shape[0] > 0:
-        feature_dir = get_feature_dir(par)
-        if not os.path.isdir(feature_dir):
-            try:
-                os.makedirs(feature_dir)
-            except:
-                return None
-        yyyymmdd, hh = parse_dt(dt)
-        df0.to_parquet(f'{feature_dir}/{yyyymmdd}.{hh:02d}.parquet')
-    return df0.shape if df0 is not None else None
-
-def read_features(dt1, dt2, feature_dir, columns=None):
-    '''
-    Reads the features data in the time range between dt1 and dt2.
-
-    Returns:
-        A dataframe.
-    '''
-    dt1 = dt1.replace(minute=0, second=0, microsecond=0)
-    dt2 = dt2.replace(minute=0, second=0, microsecond=0) - timedelta(microseconds=1)
-    dr = pd.date_range(dt1, dt2, freq='h')
-    dflist = []
-    for dt in dr:
-        yyyymmdd, hh = parse_dt(dt)
-        path = f'{feature_dir}/{yyyymmdd}.{hh:02d}.parquet'
-        if not os.path.exists(path):
-            print(path, ' not found.')
-            continue
-        df = pd.read_parquet(path, columns=columns)
-        if df is not None and df.shape[0] > 0:
-            dflist.append(df)
-    if len(dflist) > 0:
-        df = pd.concat(dflist)
-        return df
-    return None
 
