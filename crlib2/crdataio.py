@@ -42,7 +42,7 @@ def read_data(datatype, dt, locale, index_col, columns=None, product=None):
     return df
 
 def read_trade(dt, locale, index_col,
-               columns=['price', 'abs_qty', 'net_qty', 't0', 'ts'], product=None):
+               columns=['min_px', 'max_px', 'price', 'abs_qty', 'net_qty', 't0', 'ts'], product=None):
     '''
     Reads the trade data for the time dt.
     '''
@@ -50,7 +50,7 @@ def read_trade(dt, locale, index_col,
     return df
 
 def read_bbo(dt, locale, index_col,
-             columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 't0', 'ts'], product=None):
+             columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 'imbalance', 't0', 'ts'], product=None):
     '''
     Reads the bbo data for the time dt.
     '''
