@@ -61,18 +61,64 @@ def get_timeindex(interval):
         timeindex = None
     return timeindex
 
-def read_oos(st, et, par, predpar):
-    dfo = read_features(st, et, get_feature_dir(par), columns=[
-        'mid', 'adj_width', 'valid', 'tsince_trade', predpar['target_name']])
+### Features
 
-    pred_list = []
-    for t, d in zip(predpar['target_names'], predpar['fit_descs']):
-        dfp = read_pred(par, st, et, t, d)
-        pred_list.append(dfp.totpred)
-    weights = predpar['weights'] if 'weights' in predpar else [1] * len(pred_list)
-    dfo['pred'] = (pd.concat(pred_list, axis=1) * weights).sum(axis=1)
+def get_features3(dt1, par, max_timex=None):
+    '''
+    Calculate the features in a three hour period, then truncate to oen hour period.
+    '''
+    index_col = par['index_col'] if 'index_col' in par else None
+    mid_col = par['mid_col'] if 'mid_col' in par else None
+    sample_timex = par['sample_timex'] if 'sample_timex' in par else None
 
-    return dfo
+    dt2 = dt1 + timedelta(hours=1)
+
+    dft = read3('trade', dt1, par)
+    dfb = read3('bbo', dt1, par)
+    dfm = read3('midpx', dt1, par)
+    if dft is None or dfb is None or dfm is None:
+        return None
+    df = get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex)
+    df = df.loc[dt1:(dt2 - timedelta(microseconds=1))]
+    return df
+
+def write_feature(dt, par):
+    df0 = get_features3(dt, par)
+    if df0 is not None and df0.shape[0] > 0:
+        feature_dir = get_feature_dir(par)
+        if not os.path.isdir(feature_dir):
+            try:
+                os.makedirs(feature_dir)
+            except:
+                return None
+        yyyymmdd, hh = parse_dt(dt)
+        df0.to_parquet(f'{feature_dir}/{yyyymmdd}.{hh:02d}.parquet')
+    return df0.shape if df0 is not None else None
+
+def read_features(dt1, dt2, feature_dir, columns=None):
+    '''
+    Reads the features data in the time range between dt1 and dt2.
+
+    Returns:
+        A dataframe.
+    '''
+    dt1 = dt1.replace(minute=0, second=0, microsecond=0)
+    dt2 = dt2.replace(minute=0, second=0, microsecond=0) - timedelta(microseconds=1)
+    dr = pd.date_range(dt1, dt2, freq='h')
+    dflist = []
+    for dt in dr:
+        yyyymmdd, hh = parse_dt(dt)
+        path = f'{feature_dir}/{yyyymmdd}.{hh:02d}.parquet'
+        if not os.path.exists(path):
+            print(path, ' not found.')
+            continue
+        df = pd.read_parquet(path, columns=columns)
+        if df is not None and df.shape[0] > 0:
+            dflist.append(df)
+    if len(dflist) > 0:
+        df = pd.concat(dflist)
+        return df
+    return None
 
 def plot_test_features(dff):
     tarcols = [x for x in dff.columns if x.startswith('tar')]
@@ -103,6 +149,8 @@ def plot_test_features(dff):
         plt.grid()
         if(len(col) < 10):
             plt.legend()
+
+### Fitting
 
 def get_dts(st, fit_window, val_window, oos_window):
     '''
@@ -260,15 +308,31 @@ def read_pred_from_dir(pred_dir, st, et):
         return None
     return dfo
 
-def plot_target_prediction(dfo, target_name='target', pred_col='pred', nq=100):
+def read_oos(st, et, par, predpar):
+    dfo = read_features(st, et, get_feature_dir(par), columns=[
+        'mid', 'adj_width', 'valid', 'tsince_trade', predpar['target_name']])
+
+    pred_list = []
+    for t, d in zip(predpar['target_names'], predpar['fit_descs']):
+        dfp = read_pred(par, st, et, t, d)
+        pred_list.append(dfp.totpred)
+    weights = predpar['weights'] if 'weights' in predpar else [1] * len(pred_list)
+    dfo['pred'] = (pd.concat(pred_list, axis=1) * weights).sum(axis=1)
+
+    return dfo
+
+### Prediction Plots
+
+def plot_target_prediction(dfo, target_name='target', pred_col='pred', nq=100,
+        yrange_noerr=None, yrange_err=None):
     plt.figure(figsize=(12,4))
     ax = plt.subplot(1, 2, 1)
-    plot_target_prediction_nquantiles(dfo, target_name, pred_col, nq=nq, ax=ax)
+    plot_target_prediction_nquantiles(dfo, target_name, pred_col, nq=nq, ax=ax, yrange=yrange_noerr)
     ax = plt.subplot(1, 2, 2)
-    plot_target_prediction_errorbar(dfo, target_name, pred_col, ax=ax)
+    plot_target_prediction_errorbar(dfo, target_name, pred_col, ax=ax, yrange=yrange_err)
     plt.tight_layout()
 
-def plot_target_prediction_nquantiles(dfo, target_name='target', pred_col='pred', nq=100, ax=None):
+def plot_target_prediction_nquantiles(dfo, target_name='target', pred_col='pred', nq=100, ax=None, yrange=None):
     '''
     Plots target vs prediciton in 100 prediction quantiles.
     '''
@@ -279,13 +343,15 @@ def plot_target_prediction_nquantiles(dfo, target_name='target', pred_col='pred'
     tarpred = dfo.groupby(qc)[target_name].mean()
     mean_preds = dfo.groupby(qc)[pred_col].mean()
     plt.plot(mean_preds, tarpred, label=f'corr {corr:.4f}')
+    if yrange is not None:
+        plt.ylim(*yrange)
     plt.title('target vs prediction (out-of-sample)')
     plt.xlabel('prediciton')
     plt.ylabel('target')
     plt.grid()
     plt.legend()
 
-def plot_target_prediction_errorbar(dfo, target_name='target', pred_col='pred', ax=None):
+def plot_target_prediction_errorbar(dfo, target_name='target', pred_col='pred', ax=None, yrange=None):
     '''
     Plots target vs prediction in 13 quantiles of varying sizes.
     '''
@@ -296,6 +362,8 @@ def plot_target_prediction_errorbar(dfo, target_name='target', pred_col='pred', 
     bcgrp = dfo.groupby(bc)[target_name].agg(['mean', 'std'])
     bcx = dfo.groupby(bc)[pred_col].mean()
     plt.errorbar(bcx, bcgrp['mean'], yerr=bcgrp['std'], fmt='o', capsize=5)
+    if yrange is not None:
+        plt.ylim(*yrange)
     plt.title('target vs prediction w/ error bars')
     plt.xlabel('prediction')
     plt.ylabel('target')
