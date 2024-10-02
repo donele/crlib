@@ -95,7 +95,7 @@ def read_range(datatype, st, et, par=None):
     df = pd.concat(datalist)
     return df
 
-def read3(datatype, dt1, par=None):
+def read_3h(datatype, dt1, par=None):
     '''
     Reads the data in three consecutive periods from before dt1 to after dt1.
     '''
