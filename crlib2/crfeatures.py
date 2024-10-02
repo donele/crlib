@@ -19,7 +19,7 @@ def past_returns(prc, ri):
         r = (prc / prc.shift(2**ri) - 1).fillna(0).replace([np.inf, -np.inf], 0)
     return r
 
-def get_returns(df, sample_timex, max_timex, varname, returns_func):
+def get_returns(df, sample_timex, min_timex, max_timex, varname, returns_func):
     '''
     Calculates the future returns.
 
@@ -27,13 +27,13 @@ def get_returns(df, sample_timex, max_timex, varname, returns_func):
     ai: Absolute index.
     '''
     serdict = {}
-    for ri in range(max_timex - 1):
+    for ri in range(min_timex, max_timex - 1):
         ser = returns_func(df.mid, ri)
         ai = ri + sample_timex
         ser.name = f'{varname}_{ai}'
         serdict[ser.name] = ser
 
-    for ri in range(max_timex - 2):
+    for ri in range(min_timex, max_timex - 2):
         ai = ri + sample_timex
         for rj in range(ri + 1, max_timex - 1):
             if varname == 'ret' and rj > ri + 1:
@@ -48,13 +48,19 @@ def get_returns(df, sample_timex, max_timex, varname, returns_func):
     serlist = list(serdict.values())
     return serlist
 
-def features_future_returns(df, sample_timex, max_timex=10):
-    return get_returns(df, sample_timex, max_timex, 'tar', returns_func=future_returns)
+def features_future_returns(df, sample_timex, min_timex=0, max_timex=10):
+    return get_returns(df, sample_timex, min_timex, max_timex, 'tar', returns_func=future_returns)
 
-def features_past_returns(df, sample_timex, max_timex=10):
-    return get_returns(df, sample_timex, max_timex, 'ret', returns_func=past_returns)
+def features_past_returns(df, sample_timex, min_timex=0, max_timex=10):
+    return get_returns(df, sample_timex, min_timex, max_timex, 'ret', returns_func=past_returns)
 
-def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None,
+def get_timegroup(tser, sample_interval):
+    '''
+    Calculate the timestamps at the end of the time bars.
+    '''
+    return pd.to_datetime((tser // sample_interval + 1) * sample_interval, unit='us')
+
+def make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex=None, max_timex=None,
                  max_tsince_trade=5, verbose=False):
     '''
     Calculates the features.
@@ -99,7 +105,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     '''
     sample_interval = int(2**int(sample_timex))
 
-    tgrp = pd.to_datetime(dft[index_col] // sample_interval * sample_interval, unit='us')
+    tgrp = get_timegroup(dft[index_col], sample_interval)
     dftagg = dft.groupby(tgrp).agg(
         price=('price', 'last'),
         avg_price=('price', 'mean'),
@@ -114,7 +120,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     dfb['qimb'] = ((dfb.askqty - dfb.bidqty) / (dfb.askqty + dfb.bidqty)).fillna(0).replace([np.inf, -np.inf], 0)
 
-    bgrp = pd.to_datetime(dfb[index_col] // sample_interval * sample_interval, unit='us')
+    bgrp = get_timegroup(dfb[index_col], sample_interval)
     dfbagg = dfb.groupby(bgrp).agg(
         qimb=('qimb', 'last'),
         adj_askpx=('adj_askpx', 'last'),
@@ -123,7 +129,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
         max_bidqty=('bidqty', 'max'),
     )
 
-    mgrp = pd.to_datetime(dfm[index_col] // sample_interval * sample_interval, unit='us')
+    mgrp = get_timegroup(dfm[index_col], sample_interval)
     dfmagg = dfm.groupby(mgrp).agg(
         adj_width=('adj_width', 'last'),
         adj_mid_px=('adj_mid_px', 'last'),
@@ -148,6 +154,8 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     serlst = []
 
+    if min_timex is None:
+        min_timex = 0
 
     if max_timex is None:
         timex_1hr = int(log2(60*60*1e6)) # ~1 hour.
@@ -156,14 +164,14 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     # BBO related features
 
     ## Future returns
-    serlst.extend(features_future_returns(df, sample_timex, max_timex))
+    serlst.extend(features_future_returns(df, sample_timex, min_timex, max_timex))
 
     ## Past returns
-    serlst.extend(features_past_returns(df, sample_timex, max_timex))
+    serlst.extend(features_past_returns(df, sample_timex, min_timex, max_timex))
 
     ## Median qimb
 
-    for ri in range(max_timex):
+    for ri in range(min_timex, max_timex):
         w = 2**ri
         ser = df.qimb.rolling(window=w, min_periods=1).median().fillna(0).replace([np.inf, -np.inf], 0)
         ai = ri + sample_timex
@@ -172,7 +180,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     ## qimax
 
-    for ri in range(max_timex):
+    for ri in range(min_timex, max_timex):
         w = 2**ri
         ai = ri + sample_timex
         aname = f'max_askqty_{ai}'
@@ -189,7 +197,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
 
     volatlist = []
     rser = df.price / df.price.shift(1) - 1
-    for ri in range(2, max_timex):
+    for ri in range(2 + min_timex, max_timex):
         w = 2**ri
         ser = rser.rolling(window=w, min_periods=1).std()
         ai = ri + sample_timex
@@ -197,7 +205,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
         volatlist.append(ser)
     dfvolat = pd.DataFrame(volatlist).T
 
-    for ri in range(2, max_timex):
+    for ri in range(2 + min_timex, max_timex):
         ai = ri + sample_timex
         for rj in range(max(4, ri + 1), max_timex):
             aj = rj + sample_timex
@@ -212,7 +220,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     ## Hilo
 
     hilolst = []
-    for ri in range(max_timex):
+    for ri in range(min_timex, max_timex):
         w = 2**ri
         hiser = df.max_price.rolling(window=w, min_periods=1).max()
         loser = df.min_price.rolling(window=w, min_periods=1).min()
@@ -222,7 +230,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
         hilolst.append(hiser)
         hilolst.append(loser)
     dfhl = pd.DataFrame(hilolst).T
-    for ri in range(max_timex):
+    for ri in range(min_timex, max_timex):
         ai = ri + sample_timex
         hiname = f'max_price_{ai}'
         loname = f'min_price_{ai}'
@@ -236,7 +244,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     avglst = []
     netlst = []
 
-    for ri in range(max_timex):
+    for ri in range(min_timex, max_timex):
         w = 2**ri
         aser = df.sum_avg_qty.rolling(window=w, min_periods=1).sum()
         nser = df.sum_net_qty.rolling(window=w, min_periods=1).sum()
@@ -248,7 +256,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
     dfavg = pd.DataFrame(avglst).T
     dfnet = pd.DataFrame(netlst).T
 
-    for ri in range(5):
+    for ri in range(min_timex, 5):
         ai = ri + sample_timex
         for rj in range(ri + 1, max_timex):
             aj = rj + sample_timex
@@ -258,7 +266,7 @@ def get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex=None
             ser.name = f'diff_sum_avg_qty_{ai}_{aj}'
             serlst.append(ser)
 
-    for ri in range(5):
+    for ri in range(min_timex, 5):
         ai = ri + sample_timex
         for rj in range(ri + 1, max_timex):
             aj = rj + sample_timex
