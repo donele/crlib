@@ -28,7 +28,7 @@ def linreg(target_name, dft, fit_features, verbose=False):
     model.fit(X, y)
     return model
 
-def linreg_select_features(target_name, dft, dfv, metric='r2', feature_groups=None,
+def linreg_tune(target_name, dft, dfv, metric='r2', feature_groups=None,
         verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
     Select feaures recursively using validation sample.
@@ -43,7 +43,7 @@ def linreg_select_features(target_name, dft, dfv, metric='r2', feature_groups=No
         return best_model
 
     if feature_groups is None:
-        feature_groups=['ret', 'medqimb', 'qimax', 'hilo']
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
 
     allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
     if not debug_nfeature is None:
@@ -110,7 +110,7 @@ def train_linear(target_name, dft, dfv, metric='r2', feature_groups=None,
     '''
     model = None
     if features is None: # select features with validation data.
-        model = linreg_select_features(target_name, dft, dfv, metric,
+        model = linreg_tune(target_name, dft, dfv, metric,
                 feature_groups=feature_groups,
                 verbose=verbose, debug_nfeature=debug_nfeature)
     else: # feature set is fixed.
