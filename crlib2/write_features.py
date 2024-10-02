@@ -8,7 +8,7 @@ from crlib2 import *
 from crlib2.crfeatures import *
 
 def write_features():
-    parser = argparse.ArgumentParser(prog='fit1d')
+    parser = argparse.ArgumentParser(prog='write_features')
     parser.add_argument('-s', '--start-date', type=datetime.datetime.fromisoformat, required=True,
             metavar='yyyy-mm-dd.hh')
     parser.add_argument('-e', '--end-date', type=datetime.datetime.fromisoformat, required=True,
