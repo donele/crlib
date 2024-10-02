@@ -73,7 +73,7 @@ def get_model_dir(par, fitpar):
     return model_dir
 
 def get_pred_path(dt1, dt2, par, fitpar):
-    pred_dir = get_pred_dir(par, fitpar)
+    pred_dir = get_pred_dir(par, fitpar['target_name'], fitpar['fit_desc'])
     path = f'{pred_dir}/pred.{get_idate(dt1)}.{get_idate(dt2)}.parquet'
     return path
 
