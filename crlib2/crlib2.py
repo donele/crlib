@@ -63,27 +63,99 @@ def get_timeindex(interval):
 
 ### Features
 
-def get_features3(dt1, par, max_timex=None):
+def get_reg_features_3h(dt1, par, min_timex=None, max_timex=None):
     '''
     Calculate the features in a three hour period, then truncate to oen hour period.
     '''
     index_col = par['index_col'] if 'index_col' in par else None
     mid_col = par['mid_col'] if 'mid_col' in par else None
-    sample_timex = par['sample_timex'] if 'sample_timex' in par else None
+    sample_timex = par['sample_timex'] if 'sample_timex' in par else par['grid_timex'] if 'grid_timex' in par else None
 
-    dt2 = dt1 + timedelta(hours=1)
-
-    dft = read3('trade', dt1, par)
-    dfb = read3('bbo', dt1, par)
-    dfm = read3('midpx', dt1, par)
+    dft = read_3h('trade', dt1, par)
+    dfb = read_3h('bbo', dt1, par)
+    dfm = read_3h('midpx', dt1, par)
     if dft is None or dfb is None or dfm is None:
         return None
-    df = get_features(dft, dfb, dfm, sample_timex, mid_col, index_col, max_timex)
-    df = df.loc[dt1:(dt2 - timedelta(microseconds=1))]
+    df = make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex, max_timex)
+    return df
+
+def get_tevt_features_3h(dt, par, min_timex=None, max_timex=None):
+    '''
+    Calculate the features in a three hour period, then truncate to oen hour period.
+    '''
+    if min_timex is None:
+        min_timex = par['min_feature_timex'] - par['grid_timex']
+    dff = get_reg_features_3h(dt, par, min_timex, max_timex)
+
+    dft = read_3h('trade', dt, par)
+
+    # Time weighted moving average
+    min_twma_timex = 10
+    max_twma_timex = 30
+    timex_list = np.array(range(min_twma_timex, max_twma_timex))
+    dfma = pd.DataFrame(columns=[f'twma_{x}' for x in timex_list], index=dft.index)
+    dfma.iloc[0] = dft.price[0]
+    timeconsts = np.array([2.0**x for x in timex_list])
+    timediff = dft.t0.diff().fillna(0)
+    prc = dft.price
+
+    # Price MA
+    for i in range(1, len(dft)):
+        dfma.iloc[i] = dfma.iloc[i-1] + np.minimum(timeconsts, timediff.iloc[i]) / timeconsts * (prc[i] - dfma.iloc[i-1])
+
+    # twret
+    twret = pd.DataFrame((dft.price.to_numpy().reshape(-1,1) / dfma.to_numpy() - 1),
+                    index=dft.index, columns=[f'twret_{x}' for x in timex_list]).fillna(0)
+    del dfma
+    dft = pd.concat([dft, twret], axis=1)
+
+    # Determine samples and drop non-sample trades
+    dft['sample'] = False
+    dft = dft.loc[~dft.index.duplicated(keep='first')]
+    last_sample = 0
+    for idx, row in dft.iterrows():
+        if row.t0 > last_sample + 5000:
+            dft.loc[idx, 'sample'] = True
+            last_sample = row.t0
+    dft = dft[dft['sample']]
+
+    # Merge grid and trade, ffill, then select samples only
+    dfmer = pd.merge(dff, dft, how='outer', left_index=True, right_index=True, suffixes=('', '_trd'))
+    dfmer[dff.columns] = dfmer[dff.columns].ffill()
+    dfmer = dfmer[(dfmer['valid'].shift() == True)&(dfmer['sample'] == True)]
+
+    # Recalculate ret
+    retnames = [x for x in dfmer.columns if x.startswith('ret_')]
+    retidxlist = [int(x[-2:]) for x in retnames if len(x) == 6 and x[3] == '_']
+    for name in retnames:
+        dfmer[name] *= dfmer.price_trd / dfmer.price
+        dfmer[name] += dfmer.price_trd / dfmer.price - 1
+
+    # Recalculate tar
+    tarnames = [x for x in dfmer.columns if x.startswith('tar_')]
+    for name in tarnames:
+        dfmer[name] *= dfmer.price / dfmer.price_trd
+        dfmer[name] += dfmer.price / dfmer.price_trd - 1
+
+    return dfmer
+
+def get_features_3h(dt, par, min_timex=None, max_timex=None):
+    df = None
+    if 'sample_type' in par and par['sample_type'] == 'tevt':
+        df = get_tevt_features_3h(dt, par)
+    else:
+        df = get_reg_features_3h(dt, par)
+    return df
+
+def get_features_1h(dt, par, min_timex=None, max_timex=None):
+    df = get_features_3h(dt, par, min_timex, max_timex)
+    dt2 = dt + timedelta(hours=1, microseconds=-1)
+    df = df.loc[dt:dt2]
     return df
 
 def write_feature(dt, par):
-    df0 = get_features3(dt, par)
+    df0 = None
+    df0 = get_features_1h(dt, par)
     if df0 is not None and df0.shape[0] > 0:
         feature_dir = get_feature_dir(par)
         if not os.path.isdir(feature_dir):
@@ -120,18 +192,18 @@ def read_features(dt1, dt2, feature_dir, columns=None):
         return df
     return None
 
-def plot_test_features(dff):
+def plot_test_features(dff, feature_group=None):
     tarcols = [x for x in dff.columns if x.startswith('tar')]
-    ncol = len(tarcols)
-    nx = int(ncol**.5) + 1
-    ny = nx + 1
+    if feature_group is None:
+        ncol = len(tarcols)
+        nx = int(ncol**.5) + 1
+        ny = nx + 1
 
-    dff[tarcols].hist(figsize=(16,2*ny), bins=80)
-    dff[tarcols].hist(figsize=(16,2*ny), bins=80, log=True)
+        dff[tarcols].hist(figsize=(16,2*ny), bins=80)
+        dff[tarcols].hist(figsize=(16,2*ny), bins=80, log=True)
 
-    feature_groups = ['ret', 'medqimb', 'qimax', 'hilo', 'diff_sum_avg_qty', 'diff_sum_net_qty']
-    for fg in feature_groups:
-        cols = [x for x in dff.columns if x.startswith(fg+'_')]
+    else:
+        cols = [x for x in dff.columns if x.startswith(feature_group+'_')]
         dff[cols].hist(figsize=(16,12), bins=40)
 
         plt.figure(figsize=(16,4))
@@ -173,7 +245,6 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
     Returns:
         Series of predictions.
     '''
-    #feature_dir = fitpar['feature_dir']
     feature_dir = get_feature_dir(par)
     dft = read_features(dtt, dtv, feature_dir)
     dfv = read_features(dtv, dto, feature_dir)
@@ -312,11 +383,13 @@ def read_oos(st, et, par, predpar):
     dfo = read_features(st, et, get_feature_dir(par), columns=[
         'mid', 'adj_width', 'valid', 'tsince_trade', predpar['target_name']])
 
+    targets = predpar['target_names'] if 'target_names' in predpar else [predpar['target_name']]
+    descs = predpar['fit_descs'] if 'fit_descs' in predpar else [predpar['fit_desc']]
+    weights = predpar['weights'] if 'weights' in predpar else [1] * len(targets)
     pred_list = []
-    for t, d in zip(predpar['target_names'], predpar['fit_descs']):
+    for t, d in zip(targets, descs):
         dfp = read_pred(par, st, et, t, d)
         pred_list.append(dfp.totpred)
-    weights = predpar['weights'] if 'weights' in predpar else [1] * len(pred_list)
     dfo['pred'] = (pd.concat(pred_list, axis=1) * weights).sum(axis=1)
 
     return dfo
