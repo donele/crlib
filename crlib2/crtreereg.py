@@ -39,7 +39,7 @@ def lgbreg(target_name, dft, dfv, features, lgbparam, lgbverbose=False):
     model.fit(X, y, **fit_par)
     return model
 
-def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=None,
+def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
         verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
     Select feaures recursively using validation sample.
@@ -53,7 +53,7 @@ def lgbreg_select_features(target_name, dft, dfv, metric='rmse', feature_groups=
         return model
 
     if feature_groups is None:
-        feature_groups=['diff_ret', 'medqimb', 'qimax', 'hilo']
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
 
     allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
     if not debug_nfeature is None:
@@ -137,7 +137,7 @@ def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
     selected_features = None
     model = None
     if features is None: # select features with validation data.
-        model = lgbreg_select_features(target_name, dft, dfv, metric,
+        model = lgbreg_tune(target_name, dft, dfv, metric,
                 feature_groups=feature_groups,
                 verbose=False, debug_nfeature=debug_nfeature)
     else:
