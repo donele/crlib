@@ -377,18 +377,23 @@ def read_pred_from_dir(pred_dir, st, et):
     return dfo
 
 def read_oos(st, et, par, predpar):
-    feature_dir = predpar['feature_dir'] if 'feature_dir' in predpar else get_feature_dir(par)
-    dfo = read_features(st, et, get_feature_dir(par), columns=[
-        'mid', 'adj_width', 'valid', 'tsince_trade', predpar['target_name']])
-
     targets = predpar['target_names'] if 'target_names' in predpar else [predpar['target_name']]
     descs = predpar['fit_descs'] if 'fit_descs' in predpar else [predpar['fit_desc']]
     weights = predpar['weights'] if 'weights' in predpar else [1] * len(targets)
+
+    feature_dir = predpar['feature_dir'] if 'feature_dir' in predpar else get_feature_dir(par)
+    read_targets = list(set(targets + [predpar['target_name']]))
+    dfo = read_features(st, et, feature_dir, columns=['mid', 'adj_width', 'valid', 'tsince_trade'] + read_targets)
+
     pred_list = []
     for t, d in zip(targets, descs):
         dfp = read_pred(par, st, et, t, d)
-        pred_list.append(dfp.totpred)
-    dfo['pred'] = (pd.concat(pred_list, axis=1) * weights).sum(axis=1)
+        pred = dfp.totpred
+        pred.name = t.replace('tar', 'pred')
+        pred_list.append(pred)
+    sumpred = (pd.concat(pred_list, axis=1) * weights).sum(axis=1)
+    sumpred.name = 'pred'
+    dfo = pd.concat([dfo] + pred_list + [sumpred], axis=1)
 
     return dfo
 
