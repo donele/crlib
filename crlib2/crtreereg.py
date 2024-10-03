@@ -39,7 +39,12 @@ def lgbreg(target_name, dft, dfv, features, lgbparam, lgbverbose=False):
     model.fit(X, y, **fit_par)
     return model
 
-def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
+def get_best_row(df):
+    df = df.sort_values(by='va')
+    best_row = df.iloc[-1]
+    return best_row
+
+def lgbreg_tune(target_name, dft, dfv, metric='rmse', features=None, feature_groups=None,
         verbose=False, debug_nfeature=None, min_data_cnt=10):
     '''
     Select feaures recursively using validation sample.
@@ -53,9 +58,10 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
         return model
 
     if feature_groups is None:
-        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
+        feature_groups=['diff_ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
 
-    allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
+    allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])] if features is None else features
+
     if not debug_nfeature is None:
         allfeatures = allfeatures[:min(len(allfeatures), debug_nfeature)]
 
@@ -90,7 +96,7 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
             Xv = dfv.loc[dfv.valid, features]
             yv = dfv.loc[dfv.valid, target_name]
             valid_score = model.score(Xv, yv)
-            print(f'[{isim}]{valid_score:.4f} ', end='')
+            print(f'[{isim}:{mxd}.{mcs}]{valid_score:.4f} ', end='')
             sys.stdout.flush()
             dfimportance = pd.DataFrame({'name': model.feature_name_, 'importance': model.feature_importances_})
             score_list.append([udp, mxd, nl, mcs, valid_score, dfimportance, model])
@@ -104,8 +110,7 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
             nl_range = [max(2, int(df1.nl.min()) - 1), int(df1.nl.max()) + 2]
             mcs_exp_range = [int(np.log2(df1.mcs.min())) - 1, int(np.log2(df1.mcs.max())) + 1]
         else:
-            df0 = df0.sort_values(by='va')
-            best_row = df0.iloc[-1]
+            best_row = get_best_row(df0)
             best_va = best_row.va
             print(f'best udp: {best_row.udp}, mxd: {best_row.mxd}, nl: {best_row.nl}, mcs: {best_row.mcs}, va: {best_row.va:.4}\n')
 
@@ -114,10 +119,10 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
             elif selection_early_stop:
                 break
 
-            model0 = df0.iloc[-1]['model']
+            model0 = best_row.model
             final_model = model0
 
-            dfimp = df0.iloc[-1]['imp']
+            dfimp = best_row.imp
             dfimp = dfimp.sort_values(by='importance')
             features = dfimp.iloc[-int(len(dfimp)*2/3):]['name'].tolist()
             print(f'Reduced {len(features)} features: {features}')
@@ -128,11 +133,11 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', feature_groups=None,
 def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
                  features=None, verbose=False, debug_nfeature=None):
     '''
-    Performs a boosted tree regression with a fixed feature set, or by selecting
-    features recursively.
+    Performs a boosted tree regression with a fixed feature set, or by using
+    default set of features.
 
     Returns:
-        List of the selected features and the regression coefficients.
+        List of the used features and the regression coefficients.
     '''
     selected_features = None
     model = None
@@ -141,5 +146,7 @@ def train_tree(target_name, dft, dfv, metric='rmse', feature_groups=None,
                 feature_groups=feature_groups,
                 verbose=False, debug_nfeature=debug_nfeature)
     else:
-        return None
+        model = lgbreg_tune(target_name, dft, dfv, metric,
+                features=features,
+                verbose=False, debug_nfeature=debug_nfeature)
     return model
