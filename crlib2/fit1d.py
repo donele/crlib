@@ -9,7 +9,7 @@ def fit1d():
     parser.add_argument('-t', '--target', type=str, required=True, help='Target Name')
     parser.add_argument('-a', '--fit-algo', type=str, required=True, help='Fit Algo Name', choices=['lin', 'tree'])
     parser.add_argument('-x', '--fit-desc', type=str, required=True, help='Fit Description')
-    parser.add_argument('-g', '--feature-group', nargs='+', help='Feature Groups')
+    parser.add_argument('-g', '--feature-groups', nargs='+', help='Feature Groups', default=None)
     parser.add_argument('-f', '--fit-window', type=int, required=True, help='Fitting Window')
     parser.add_argument('-v', '--val-window', type=int, required=True, help='Valadation Window')
     parser.add_argument('-o', '--oos-window', type=int, required=True, help='OOS Window')
@@ -38,9 +38,9 @@ def fit1d():
     dte = dto + timedelta(days = a.oos_window)
 
     if a.fit_algo == 'lin':
-        oos_linear(par, fitpar, dtt, dtv, dto, dte)
+        oos_linear(par, fitpar, dtt, dtv, dto, dte, feature_groups=a.feature_groups)
     elif a.fit_algo == 'tree':
-        oos_tree(par, fitpar, dtt, dtv, dto, dte)
+        oos_tree(par, fitpar, dtt, dtv, dto, dte, feature_groups=a.feature_groups)
 
 if __name__ == '__main__':
     fit1d()
