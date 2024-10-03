@@ -1,22 +1,19 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import os
 import sys
 import glob
 import pickle
-import datetime
 import seaborn as sns
 import yaml
 from datetime import timedelta
-from math import *
 
-from crlib2.crpaths import *
-from crlib2.crdataio import *
-from crlib2.crfeatures import *
-from crlib2.crlinreg import *
-from crlib2.crtreereg import *
+from .crdataio import *
+from .crfeatures import *
+from .crlinreg import *
+from .crpaths import *
+from .crtreereg import *
 
 dfuniv = None
 upath = 'universe.csv'
@@ -245,7 +242,7 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
     Returns:
         Series of predictions.
     '''
-    feature_dir = get_feature_dir(par)
+    feature_dir = fitpar['feature_dir'] if 'feature_dir' in fitpar else get_feature_dir(par)
     dft = read_features(dtt, dtv, feature_dir)
     dfv = read_features(dtv, dto, feature_dir)
     if dft is None or dfv is None or len(dft) < 1 or len(dfv) < 1:
@@ -380,6 +377,7 @@ def read_pred_from_dir(pred_dir, st, et):
     return dfo
 
 def read_oos(st, et, par, predpar):
+    feature_dir = predpar['feature_dir'] if 'feature_dir' in predpar else get_feature_dir(par)
     dfo = read_features(st, et, get_feature_dir(par), columns=[
         'mid', 'adj_width', 'valid', 'tsince_trade', predpar['target_name']])
 
