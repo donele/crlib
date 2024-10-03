@@ -58,7 +58,7 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', features=None, feature_gro
         return model
 
     if feature_groups is None:
-        feature_groups=['diff_ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
 
     allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])] if features is None else features
 
