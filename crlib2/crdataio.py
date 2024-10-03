@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 
-from crlib2.crpaths import *
+crdata_map = {
+    'default': {0: '/mnt/bigdata1/crdata',
+            20240601: '/mnt/bigdata2/crdata',
+             },
+}
 
 def parse_dt(dt):
     '''
@@ -12,6 +16,23 @@ def parse_dt(dt):
     yyyymmdd = dt.year * 10000 + dt.month * 100 + dt.day
     hh = dt.hour
     return yyyymmdd, hh
+
+def get_data_dir(dt, locale):
+    yyyy = dt.year
+    mmdd = dt.month * 100 + dt.day
+    yyyymmdd = yyyy * 10000 + mmdd
+
+    switchmap = crdata_map[locale] if locale in crdata_map else crdata_map['default']
+    switchdate = 0
+    for k, v in switchmap.items():
+        if k > switchdate and k <= yyyymmdd:
+            switchdate = k
+    disk = switchmap[switchdate]
+
+    data_dir = f'{disk}/{locale}.{yyyy}/{mmdd:04}'
+    if not os.path.isdir(data_dir):
+        os.makedirs(data_dir)
+    return data_dir
 
 def read_data(datatype, dt, locale, index_col, columns=None, product=None):
     '''

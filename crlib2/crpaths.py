@@ -1,34 +1,11 @@
 import os
 
-crdata_map = {
-    'default': {0: '/mnt/bigdata1/crdata',
-            20240701: '/mnt/bigdata2/crdata',
-             },
-}
-
 def get_idate(dt):
     '''
     Returns the date in yyyymmdd format.
     '''
     idate = int(dt.strftime('%Y%m%d'))
     return idate
-
-def get_data_dir(dt, locale):
-    yyyy = dt.year
-    mmdd = dt.month * 100 + dt.day
-    yyyymmdd = yyyy * 10000 + mmdd
-
-    switchmap = crdata_map[locale] if locale in crdata_map else crdata_map['default']
-    switchdate = 0
-    for k, v in switchmap.items():
-        if k > switchdate and k <= yyyymmdd:
-            switchdate = k
-    disk = switchmap[switchdate]
-
-    data_dir = f'{disk}/{locale}.{yyyy}/{mmdd:04}'
-    if not os.path.isdir(data_dir):
-        os.makedirs(data_dir)
-    return data_dir
 
 def get_feature_dir(par, basedir='/home/jdlee'):
     exch = par['product'][0]
