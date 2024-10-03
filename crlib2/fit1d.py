@@ -8,6 +8,8 @@ def fit1d():
     parser = argparse.ArgumentParser(prog='fit1d')
     parser.add_argument('-t', '--target', type=str, required=True, help='Target Name')
     parser.add_argument('-a', '--fit-algo', type=str, required=True, help='Fit Algo Name', choices=['lin', 'tree'])
+    parser.add_argument('-x', '--fit-desc', type=str, required=True, help='Fit Description')
+    parser.add_argument('-g', '--feature-group', nargs='+', help='Feature Groups')
     parser.add_argument('-f', '--fit-window', type=int, required=True, help='Fitting Window')
     parser.add_argument('-v', '--val-window', type=int, required=True, help='Valadation Window')
     parser.add_argument('-o', '--oos-window', type=int, required=True, help='OOS Window')
@@ -19,11 +21,14 @@ def fit1d():
 
     par = read_params('params.yaml')
     print(par)
+
+    fit_desc = f'{a.fit_algo}{a.fit_window}{a.val_window}{a.oos_window}'
+    if a.fit_desc != '':
+        fit_desc += '.' + a.fit_desc
     
     fitpar = {
         'target_name': a.target,
-        'fit_desc': f'{a.fit_algo}{a.fit_window}{a.val_window}{a.oos_window}',
-        'feature_dir': get_feature_dir(par),
+        'fit_desc': fit_desc,
     }
     print(fitpar)
     
@@ -31,7 +36,7 @@ def fit1d():
     dtt = dto - timedelta(days = a.val_window + a.fit_window)
     dtv = dto - timedelta(days = a.val_window)
     dte = dto + timedelta(days = a.oos_window)
-    
+
     if a.fit_algo == 'lin':
         oos_linear(par, fitpar, dtt, dtv, dto, dte)
     elif a.fit_algo == 'tree':
