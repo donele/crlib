@@ -8,7 +8,7 @@ def fit1d():
     parser = argparse.ArgumentParser(prog='fit1d')
     parser.add_argument('-t', '--target', type=str, required=True, help='Target Name')
     parser.add_argument('-a', '--fit-algo', type=str, required=True, help='Fit Algo Name', choices=['lin', 'tree'])
-    parser.add_argument('-x', '--fit-desc', type=str, required=True, help='Fit Description')
+    parser.add_argument('-x', '--fit-desc', type=str, help='Fit Description')
     parser.add_argument('-g', '--feature-groups', nargs='+', help='Feature Groups', default=None)
     parser.add_argument('-f', '--fit-window', type=int, required=True, help='Fitting Window')
     parser.add_argument('-v', '--val-window', type=int, required=True, help='Valadation Window')
@@ -23,7 +23,7 @@ def fit1d():
     print(par)
 
     fit_desc = f'{a.fit_algo}{a.fit_window}{a.val_window}{a.oos_window}'
-    if a.fit_desc != '':
+    if a.fit_desc is not None and a.fit_desc != '':
         fit_desc += '.' + a.fit_desc
     
     fitpar = {
