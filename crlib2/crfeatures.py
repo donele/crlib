@@ -5,8 +5,6 @@ import numpy as np
 import pandas as pd
 from math import log2
 
-from crlib2.crdataio import *
-
 def future_returns(prc, ri):
     r = None
     if prc is not None and len(prc) > ri:
