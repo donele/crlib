@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import multiprocessing as mp
 import os
 import sys
 import glob
@@ -399,7 +401,7 @@ def read_oos(st, et, par, predpar):
 
 ### Prediction Plots
 
-def plot_target_prediction(dfo, target_name='target', pred_col='pred', nq=100,
+def plot_target_prediction(dfo, target_name='target', pred_col='pred', nq=20,
         yrange_noerr=None, yrange_err=None):
     plt.figure(figsize=(12,4))
     ax = plt.subplot(1, 2, 1)
@@ -462,23 +464,27 @@ def get_pnl(dfo, target_name, feebp):
     entry = dfo.valid & ((dfo.pred > cost) | (dfo.pred < -cost))
 
     # position
-    position = pd.Series(np.nan, index=dfo.index)
-    position[entry] = np.sign(dfo.pred)
-    position = position.copy().ffill()
+    pos0 = pd.Series(np.nan, index=dfo.index)
+    pos0[entry] = np.sign(dfo.pred)
+    pos0 = pos0.copy().ffill()
 
     # exit condition
-    exitcond = (~dfo.valid) | (~entry & (((position.shift() > 0) & (dfo.pred < -cost)) | ((position.shift() < 0) & (dfo.pred > cost))))
-    position[exitcond] = 0
+    exitcond = (~dfo.valid) | (~entry & (((pos0.shift() > 0) & (dfo.pred < -cost)) | ((pos0.shift() < 0) & (dfo.pred > cost))))
+    pos0[exitcond] = 0
 
-    # group and transform
+    # group and transform for final position series
     dummy = entry | exitcond
-    position = position.groupby(dummy.cumsum()).transform(lambda x: x.iloc[0]).fillna(0)
-    pnl = (position * dfo[target_name] - (position.shift() - position).abs()*cost).fillna(0)
+    pos = pd.Series(np.nan, index=dfo.index)
+    pos.loc[dummy] = pos0.loc[dummy]
+    pos = pos.ffill()
+
+    # pnl
+    pnl = (pos * dfo[target_name] - (pos.shift() - pos).abs()*cost).fillna(0)
 
     pnl.name = (feebp, 'pnl')
-    position.name = (feebp, 'pos')
+    pos.name = (feebp, 'pos')
     entry.name = (feebp, 'entry')
-    return pnl, position, entry
+    return pnl, pos, entry
 
 def get_aggpnl(pnl):
     '''
@@ -490,13 +496,43 @@ def get_aggpnl(pnl):
     aggpnl = None
     time_range = pnl.index[-1] - pnl.index[0]
     if time_range > timedelta(days=100):
-        aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(hour=0, minute=0, second=0, microsecond=0))).sum()
+        day_in_ns = int(60*60*1e9)
+        day_to_us = int(60*60*1e6)
+        aggpnl = pnl.groupby(pd.to_datetime(pnl.index.astype(int)//day_in_ns*day_to_us, unit='us')).sum()
     elif time_range > timedelta(hours=100):
-        aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(minute=0, second=0, microsecond=0))).sum()
+        hr_in_ns = int(60*60*1e9)
+        hr_to_us = int(60*60*1e6)
+        aggpnl = pnl.groupby(pd.to_datetime(pnl.index.astype(int)//hr_in_ns*hr_to_us, unit='us')).sum()
     else:
-        aggpnl = pnl.groupby(pnl.index.to_series().apply(lambda x: x.replace(second=0, microsecond=0))).sum()
+        min_in_ns = int(60*1e9)
+        min_to_us = int(60*1e6)
+        aggpnl = pnl.groupby(pd.to_datetime(pnl.index.astype(int)//min_in_ns*min_to_us, unit='us')).sum()
 
     return aggpnl
+
+def get_pnls_sp(dfo, target_name, feebp_list):
+    '''
+    Calculates multiple pnl series using the trading fees passed from the caller.
+
+    Returns:
+        Dataframe with a multiindex column. The first level of the multiindex column is
+        the trading fee in basis points. The second level is ('pnl', 'position').
+    '''
+    cols = []
+    for feebp in feebp_list:
+        pnl, pos, entry = get_pnl(dfo, target_name, feebp)
+        cols.append(pnl)
+        cols.append(pos)
+        cols.append(entry)
+
+    aggcols = []
+    for pnl in [x for x in cols if x.name[1] == 'pnl']:
+        aggpnl = get_aggpnl(pnl)
+        aggcols.append(aggpnl)
+
+    df = pd.concat(cols, axis=1)
+    dfagg = pd.concat(aggcols, axis=1)
+    return df, dfagg
 
 def get_pnls(dfo, target_name, feebp_list):
     '''
@@ -507,15 +543,20 @@ def get_pnls(dfo, target_name, feebp_list):
         the trading fee in basis points. The second level is ('pnl', 'position').
     '''
     cols = []
-    aggcols = []
     for feebp in feebp_list:
         pnl, pos, entry = get_pnl(dfo, target_name, feebp)
         cols.append(pnl)
         cols.append(pos)
         cols.append(entry)
 
-        aggpnl = get_aggpnl(pnl)
-        aggcols.append(aggpnl)
+    aggcols = []
+    pool = mp.Pool(processes=6)
+    results = [pool.apply_async(get_aggpnl, args=(pnl,)) for pnl in cols if pnl.name[1] == 'pnl']
+    pool.close()
+    pool.join()
+    for res in results:
+        aggcols.append(res.get())
+
     df = pd.concat(cols, axis=1)
     dfagg = pd.concat(aggcols, axis=1)
     return df, dfagg
@@ -557,6 +598,90 @@ def get_holding_summary(dfpnl, dfo):
 
     pass
 
+def get_trade_summary_fee(feebp, df, dfo, target_name):
+    biaspct = 0 # A measure of overfitting. Indpendent of trading cost.
+    if dfo is not None and target_name in dfo.columns:
+        predlim = dfo.pred.quantile([0.01, 0.99])
+        dftopbot = dfo[(dfo.pred < predlim.iloc[0]) | (dfo.pred > predlim.iloc[1])]
+        biaspct = ((dftopbot.pred - dftopbot[target_name]) * np.sign(dftopbot.pred)).mean() / dftopbot.pred.abs().mean()
+
+    pos = df['pos']
+    pnl = df['pnl']
+    entry = df['entry']
+
+    ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
+
+    n_data_points = pos.shape[0] # number of data points
+    n_nan = pos[pos.isna()].shape[0] # Nan's in pos
+    n_nopos = pos[pos==0].shape[0] # no position
+
+    n_take = pos[(pos!=0)&(pos.shift()!=pos)].shape[0] / ndays # entries
+    n_exit = pos[(pos==0)&(pos.shift()!=pos)&(pos.shift().notna())].shape[0] / ndays # exits
+    n_flip = pos[(pos.shift()*pos<0)].shape[0]/ ndays # flips
+
+    n_pos = pos.mean()
+    g_pos = pos.abs().mean()
+    sample_interval = (pos.index[1]-pos.index[0]).total_seconds()
+    dfpos = pos.groupby((pos!= pos.shift()).cumsum()).agg(len=('count'), val=('first'))
+    holding = dfpos.loc[dfpos.val!=0, 'len'].mean() * sample_interval # average holding
+    median_holding = dfpos.loc[dfpos.val!=0, 'len'].median() * sample_interval # median holding
+
+    d_volume = (pos - pos.shift()).abs().sum()/ndays # daily volume
+    d_pnl = pnl.sum() / ndays
+    d_shrp = get_daily_sharpe(pnl)
+
+    sig_rat = entry[entry].sum() / len(entry)
+
+    dft = df.groupby((df.pos.shift() != df.pos).cumsum()).agg(
+        pos=('pos', 'mean'), pnl=('pnl', 'sum'))
+    dft = dft[dft.pos != 0]
+
+    w_rat = len(dft[dft.pnl > 0]) / len(dft) if len(dft) > 0 else 0
+    dftb = dft[dft.pos > 0]
+    bw_rat = len(dftb[dftb.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
+    dfts = dft[dft.pos < 0]
+    sw_rat = len(dfts[dfts.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
+
+    gpt = dft.pnl.mean()*1e4
+    b_gpt = dft[dft.pos > 0].pnl.mean()*1e4
+    s_gpt = dft[dft.pos < 0].pnl.mean()*1e4
+    (w_mean, w_std) = dft[dft.pnl>0].pnl.agg(['mean', 'std'])*1e4
+    (l_mean, l_std) = dft[dft.pnl<0].pnl.agg(['mean', 'std'])*1e4
+
+    mbiaspct = 0 # A measure of overfitting for marketable sample.
+    if dfo is not None and target_name in dfo.columns:
+        dfentry = dfo[dfo.valid & (pos.shift() != pos) & (pos != 0)]
+        mbiaspct = ((dfentry.pred - dfentry[target_name]) * np.sign(dfentry.pred)).mean() / dfentry.pred.abs().mean()
+
+    summ = dict(
+        fee = round(feebp, 2),
+        n_take = round(n_take, 1),
+        n_exit = round(n_exit, 1),
+        n_flip = round(n_flip, 1),
+
+        n_pos = round(n_pos, 4),
+        g_pos = round(g_pos, 4),
+        holding = round(holding, 1),
+        bias = round(biaspct, 2),
+        mbias = round(mbiaspct, 2),
+        d_volume = round(d_volume, 1),
+        d_pnl = round(d_pnl, 3),
+        d_shrp = round(d_shrp, 2),
+
+        sig_rat = round(sig_rat, 2),
+        w_rat = round(w_rat, 2),
+        bw_rat = round(bw_rat, 2),
+        sw_rat = round(sw_rat, 2),
+        gpt = round(gpt, 2),
+        b_gpt = round(b_gpt, 2),
+        s_gpt = round(s_gpt, 2),
+        w_mean = round(w_mean, 2),
+        w_std = round(w_std, 2),
+        l_mean = round(l_mean, 2),
+        l_std = round(l_std, 2),
+    )
+    return summ
+
 def get_trade_summary(dfpnl, dfo=None, target_name=None):
     '''
     Calculate stats of the trading.
@@ -564,92 +689,33 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
     Returns:
         A dataframe.
     '''
-    biaspct = 0 # A measure of overfitting. Indpendent of trading cost.
-    if dfo is not None and target_name in dfo.columns:
-        predlim = dfo.pred.quantile([0.01, 0.99])
-        dftopbot = dfo[(dfo.pred < predlim.iloc[0]) | (dfo.pred > predlim.iloc[1])]
-        biaspct = ((dftopbot.pred - dftopbot[target_name]) * np.sign(dftopbot.pred)).mean() / dftopbot.pred.abs().mean()
-
     summ_list = []
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
         df = dfpnl[feebp]
-        pos = df['pos']
-        pnl = df['pnl']
-        entry = df['entry']
-
-        ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
-
-        n_data_points = pos.shape[0] # number of data points
-        n_nan = pos[pos.isna()].shape[0] # Nan's in pos
-        n_nopos = pos[pos==0].shape[0] # no position
-
-        n_take = pos[(pos!=0)&(pos.shift()!=pos)].shape[0] / ndays # entries
-        n_exit = pos[(pos==0)&(pos.shift()!=pos)&(pos.shift().notna())].shape[0] / ndays # exits
-        n_flip = pos[(pos.shift()*pos<0)].shape[0]/ ndays # flips
-
-        n_pos = pos.mean()
-        g_pos = pos.abs().mean()
-        sample_interval = (pos.index[1]-pos.index[0]).total_seconds()
-        dfpos = pos.groupby((pos!= pos.shift()).cumsum()).agg(len=('count'), val=('first'))
-        holding = dfpos.loc[dfpos.val!=0, 'len'].mean() * sample_interval # average holding
-        median_holding = dfpos.loc[dfpos.val!=0, 'len'].median() * sample_interval # median holding
-
-        d_volume = (pos - pos.shift()).abs().sum()/ndays # daily volume
-        d_pnl = pnl.sum() / ndays
-        d_shrp = get_daily_sharpe(pnl)
-
-        sig_rat = entry[entry].sum() / len(entry)
-
-        dft = df.groupby((df.pos.shift() != df.pos).cumsum()).agg(
-            pos=('pos', 'mean'), pnl=('pnl', lambda x: x.sum()))
-        dft = dft[dft.pos != 0]
-
-        w_rat = len(dft[dft.pnl > 0]) / len(dft) if len(dft) > 0 else 0
-        dftb = dft[dft.pos > 0]
-        bw_rat = len(dftb[dftb.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
-        dfts = dft[dft.pos < 0]
-        sw_rat = len(dfts[dfts.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
-
-        gpt = dft.pnl.mean()*1e4
-        b_gpt = dft[dft.pos > 0].pnl.mean()*1e4
-        s_gpt = dft[dft.pos < 0].pnl.mean()*1e4
-        (w_mean, w_std) = dft[dft.pnl>0].pnl.agg(['mean', 'std'])*1e4
-        (l_mean, l_std) = dft[dft.pnl<0].pnl.agg(['mean', 'std'])*1e4
-
-        mbiaspct = 0 # A measure of overfitting for marketable sample.
-        if dfo is not None and target_name in dfo.columns:
-            dfentry = dfo[dfo.valid & (pos.shift() != pos) & (pos != 0)]
-            mbiaspct = ((dfentry.pred - dfentry[target_name]) * np.sign(dfentry.pred)).mean() / dfentry.pred.abs().mean()
-
-        summ = dict(
-            fee = round(feebp, 2),
-            n_take = round(n_take, 1),
-            n_exit = round(n_exit, 1),
-            n_flip = round(n_flip, 1),
-
-            n_pos = round(n_pos, 4),
-            g_pos = round(g_pos, 4),
-            holding = round(holding, 1),
-            bias = round(biaspct, 2),
-            mbias = round(mbiaspct, 2),
-            d_volume = round(d_volume, 1),
-            d_pnl = round(d_pnl, 3),
-            d_shrp = round(d_shrp, 2),
-
-            sig_rat = round(sig_rat, 2),
-            w_rat = round(w_rat, 2),
-            bw_rat = round(bw_rat, 2),
-            sw_rat = round(sw_rat, 2),
-            gpt = round(gpt, 2),
-            b_gpt = round(b_gpt, 2),
-            s_gpt = round(s_gpt, 2),
-            w_mean = round(w_mean, 2),
-            w_std = round(w_std, 2),
-            l_mean = round(l_mean, 2),
-            l_std = round(l_std, 2),
-         )
+        summ = get_trade_summary_fee(feebp, df, dfo, target_name)
         summ_list.append(summ)
+
+    dftsumm = pd.DataFrame(summ_list).set_index('fee')
+    return dftsumm
+
+def get_trade_summary_mp(dfpnl, dfo=None, target_name=None):
+    '''
+    Calculate stats of the trading.
+
+    Returns:
+        A dataframe.
+    '''
+    summ_list = []
+    feebp_list = dfpnl.columns.get_level_values(0).unique()
+
+    pool = mp.Pool(processes=6)
+    results = [pool.apply_async(get_trade_summary_fee, args=(feebp, dfpnl[feebp], dfo, target_name))
+            for feebp in feebp_list]
+    pool.close()
+    pool.join()
+    for result in results:
+        summ_list.append(result.get())
 
     dftsumm = pd.DataFrame(summ_list).set_index('fee')
     return dftsumm
@@ -670,3 +736,39 @@ def print_markdown(dftrdsumm):
     print('|---|', '|'.join(['--:'] * len(dftrdsumm.columns)), '|')
     for indx, row in dftrdsumm.iterrows():
         print('|', indx, '|', '|'.join(row.astype(str).tolist()), '|')
+
+def steps(df):
+    '''
+    Manipulates the price series to be used for the step-like representation of the prices.
+
+    Returns:
+        Modified price series.
+    '''
+    index_name = df.index.name
+    tmp_index_name = 'tmp'
+    shifted = df.shift().dropna()
+    return pd.concat([shifted, df]).reset_index().rename_axis(tmp_index_name).sort_values(
+        by=[index_name, tmp_index_name]).set_index(index_name)
+
+def plot_trade(dt, span, dft, dfb, dfm):
+    '''
+    Plots the price series of bbo, trade, and midpx data.
+    '''
+    dtfrom = dt - timedelta(seconds=span)
+    dtto = dt + timedelta(seconds=span)
+
+    fig, ax = plt.subplots(figsize=(12,3))
+    fmt = '.-'
+
+    plt.plot(steps(dfb.loc[dtfrom:dtto, 'bidpx']), fmt, label='bid')
+    plt.plot(steps(dfb.loc[dtfrom:dtto, 'askpx']), fmt, label='ask')
+    plt.plot(steps(dfm.loc[dtfrom:dtto, 'mid_px']), fmt, label='mid')
+    plt.plot(dft.loc[dtfrom:dtto].price, '.', label='trade')
+
+    plt.title(f'{dt} +- {span}sec')
+    myFmt = mdates.DateFormatter(":%S.%f")
+    ax.xaxis.set_major_formatter(myFmt)
+
+    plt.grid()
+    plt.legend()
+
