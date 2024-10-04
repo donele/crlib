@@ -100,6 +100,8 @@ def read_range(datatype, st, et, par=None):
     '''
     Reads the tick data of the specified type within the specified time range st and et.
     '''
+    st = st.replace(minute=0, second=0, microsecond=0)
+    et = et.replace(minute=0, second=0, microsecond=0)
     locale = par['locale'] if 'locale' in par else None
     index_col = par['index_col'] if 'index_col' in par else None
     product = par['product'] if 'product' in par else None
