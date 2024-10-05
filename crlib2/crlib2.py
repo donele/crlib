@@ -493,6 +493,7 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, thresbp=.2):
     order = pd.Series(0, index=dfo.index)
     pos = pd.Series(0, index=dfo.index)
     entry = pd.Series(False, index=dfo.index)
+    pnlentry = pd.Series(0, index=dfo.index)
 
     ordsize = 0
     ordprc = 0
@@ -505,11 +506,13 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, thresbp=.2):
                 currpos += ordsize
                 ordsize = 0
                 entry[idx] = True
+                pnlentry[idx] += (row.mid / ordprc - 1)
         elif ordsize < 0:
             if ordprc <= row.mid: # sell
                 currpos += ordsize
                 ordsize = 0
                 entry[idx] = True
+                pnlentry[idx] -= (row.mid / ordprc - 1)
 
         pos[idx] = currpos
         buymargin = pred + rebate
@@ -527,6 +530,7 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, thresbp=.2):
         order[idx] = ordsize
 
     pnl = pos * (dfo.mid.shift(-1)/dfo.mid - 1).fillna(0) + (pos.shift() - pos).fillna(0).abs()*rebate
+    pnl += pnlentry
     pnl.name = (thresbp, 'pnl')
     pos.name = (thresbp, 'pos')
     entry.name = (thresbp, 'entry')
