@@ -117,10 +117,14 @@ def make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex=Non
         print(dftagg)
 
     dfb['qimb'] = ((dfb.askqty - dfb.bidqty) / (dfb.askqty + dfb.bidqty)).fillna(0).replace([np.inf, -np.inf], 0)
+    dfb['width'] = (dfb.askpx - dfb.bidpx) / (.5*dfb.askpx + .5*dfb.bidpx)
 
     bgrp = get_timegroup(dfb[index_col], sample_interval)
     dfbagg = dfb.groupby(bgrp).agg(
         qimb=('qimb', 'last'),
+        askpx=('askpx', 'last'),
+        bidpx=('bidpx', 'last'),
+        width=('width', 'last'),
         adj_askpx=('adj_askpx', 'last'),
         adj_bidpx=('adj_bidpx', 'last'),
         max_askqty=('askqty', 'max'),
@@ -140,10 +144,13 @@ def make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex=Non
 
     # mid price, to be used for some feature calculation.
     # df['mid'] = df['adj_askpx'] - df['adj_bidpx'] # this can be negative!
-    df['mid'] = df[mid_col] # Synthetic price from a model.
+    if mid_col == 'bidask':
+        df['mid'] = .5*df['askpx'] + .5*df['bidpx']
+    else:
+        df['mid'] = df[mid_col]
 
     # ffill
-    ffill_cols = ['mid', 'adj_askpx', 'adj_bidpx', 'adj_width', 'last_trade']
+    ffill_cols = ['mid', 'width', 'adj_askpx', 'adj_bidpx', 'adj_width', 'last_trade']
     df[ffill_cols] = df[ffill_cols].ffill()
 
     # tsince_trade
