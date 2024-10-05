@@ -476,15 +476,62 @@ def get_pnl(dfo, target_name, feebp):
     dummy = entry | exitcond
     pos = pd.Series(np.nan, index=dfo.index)
     pos.loc[dummy] = pos0.loc[dummy]
-    pos = pos.ffill()
+    pos = pos.ffill().fillna(0)
 
     # pnl
-    pnl = (pos * dfo[target_name] - (pos.shift() - pos).abs()*cost).fillna(0)
+    pnl = pos * (dfo.mid.shift(-1)/dfo.mid - 1).fillna(0) - (pos.shift() - pos).fillna(0).abs()*cost
 
     pnl.name = (feebp, 'pnl')
     pos.name = (feebp, 'pos')
     entry.name = (feebp, 'entry')
     return pnl, pos, entry
+
+def get_mm_pnl(dfo, target_name, rebatebp=0.5, thresbp=.2):
+    thres = thresbp * 1e-4
+    rebate = rebatebp * 1e-4
+
+    order = pd.Series(0, index=dfo.index)
+    pos = pd.Series(0, index=dfo.index)
+    entry = pd.Series(False, index=dfo.index)
+
+    ordsize = 0
+    ordprc = 0
+    currpos = 0
+    for idx, row in dfo.iterrows():
+        pred = row.pred
+        # Fill
+        if ordsize > 0:
+            if ordprc >= row.mid: # buy
+                currpos += ordsize
+                ordsize = 0
+                entry[idx] = True
+        elif ordsize < 0:
+            if ordprc <= row.mid: # sell
+                currpos += ordsize
+                ordsize = 0
+                entry[idx] = True
+
+        pos[idx] = currpos
+        buymargin = pred + rebate
+        sellmargin = -pred + rebate
+
+        if currpos <= 0 and buymargin > thres and buymargin > sellmargin: # Buy
+            ordsize = 1
+            ordprc = row.mid * (1 - buymargin - thres)
+        elif currpos >= 0 and sellmargin > thres and sellmargin > buymargin: # Sell
+            ordsize = -1
+            ordprc = row.mid * (1 + sellmargin + thres)
+
+        if buymargin < 0 and sellmargin < 0:
+            ordsize = 0
+        order[idx] = ordsize
+
+    pnl = pos * (dfo.mid.shift(-1)/dfo.mid - 1).fillna(0) + (pos.shift() - pos).fillna(0).abs()*rebate
+    pnl.name = (thresbp, 'pnl')
+    pos.name = (thresbp, 'pos')
+    entry.name = (thresbp, 'entry')
+    order.name = (thresbp, 'order')
+    return pnl, pos, entry, order
 
 def get_aggpnl(pnl):
     '''
@@ -524,19 +571,13 @@ def get_pnls_sp(dfo, target_name, feebp_list):
         cols.append(pnl)
         cols.append(pos)
         cols.append(entry)
-
-    aggcols = []
-    for pnl in [x for x in cols if x.name[1] == 'pnl']:
-        aggpnl = get_aggpnl(pnl)
-        aggcols.append(aggpnl)
-
     df = pd.concat(cols, axis=1)
-    dfagg = pd.concat(aggcols, axis=1)
-    return df, dfagg
+    return df
 
 def get_pnls(dfo, target_name, feebp_list):
     '''
     Calculates multiple pnl series using the trading fees passed from the caller.
+    Use the multiprocessing module.
 
     Returns:
         Dataframe with a multiindex column. The first level of the multiindex column is
@@ -548,18 +589,31 @@ def get_pnls(dfo, target_name, feebp_list):
         cols.append(pnl)
         cols.append(pos)
         cols.append(entry)
+    df = pd.concat(cols, axis=1)
+    return df
+
+def get_mm_pnls(dfo, target_name, thresbp_list, rebatebp=0.5):
+    cols = []
+    for thresbp in thresbp_list:
+        pnl, pos, entry, order = get_mm_pnl(dfo, target_name, rebatebp, thresbp)
+        if pnl is not None:
+            cols.append(pnl)
+            cols.append(pos)
+            cols.append(entry)
+            cols.append(order)
 
     aggcols = []
     pool = mp.Pool(processes=6)
-    results = [pool.apply_async(get_aggpnl, args=(pnl,)) for pnl in cols if pnl.name[1] == 'pnl']
+    results = [pool.apply_async(get_aggpnl, args=(pnl,)) for pnl in cols if pnl is not None and pnl.name is not None and pnl.name[1] == 'pnl']
     pool.close()
     pool.join()
     for res in results:
         aggcols.append(res.get())
 
     df = pd.concat(cols, axis=1)
-    dfagg = pd.concat(aggcols, axis=1)
+    dfagg = pd.concat(aggcols, axis=1) if len(aggcols) > 0 else None
     return df, dfagg
+    #return df
 
 def get_daily_sharpe(pnl):
     '''
@@ -578,7 +632,7 @@ def get_daily_sharpe(pnl):
         d_shrp = pnlmean / pnlstd * dfac
     return d_shrp
 
-def plot_pnl(dfpnl):
+def plot_pnl(dfpnl, label='fee'):
     '''
     Plots the cumulative pnl.
     '''
@@ -586,7 +640,8 @@ def plot_pnl(dfpnl):
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
         pnl = dfpnl[feebp]['pnl']
-        plt.plot(pnl.cumsum(), label=f'fee={feebp}bp')
+        aggpnl = get_aggpnl(pnl)
+        plt.plot(aggpnl.cumsum(), label=f'{label}={feebp}bp')
     plt.title('cumulative pnl')
     plt.ylabel('pnl')
     plt.xticks(rotation=20)
@@ -598,16 +653,16 @@ def get_holding_summary(dfpnl, dfo):
 
     pass
 
-def get_trade_summary_fee(feebp, df, dfo, target_name):
+def get_trade_summary_fee(feebp, df, dfo, target_name, label):
     biaspct = 0 # A measure of overfitting. Indpendent of trading cost.
     if dfo is not None and target_name in dfo.columns:
         predlim = dfo.pred.quantile([0.01, 0.99])
         dftopbot = dfo[(dfo.pred < predlim.iloc[0]) | (dfo.pred > predlim.iloc[1])]
         biaspct = ((dftopbot.pred - dftopbot[target_name]) * np.sign(dftopbot.pred)).mean() / dftopbot.pred.abs().mean()
 
-    pos = df['pos']
-    pnl = df['pnl']
-    entry = df['entry']
+    pos = df['pos'].fillna(0)
+    pnl = df['pnl'].fillna(0)
+    entry = df['entry'].fillna(False)
 
     ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
 
@@ -653,36 +708,36 @@ def get_trade_summary_fee(feebp, df, dfo, target_name):
         dfentry = dfo[dfo.valid & (pos.shift() != pos) & (pos != 0)]
         mbiaspct = ((dfentry.pred - dfentry[target_name]) * np.sign(dfentry.pred)).mean() / dfentry.pred.abs().mean()
 
-    summ = dict(
-        fee = round(feebp, 2),
-        n_take = round(n_take, 1),
-        n_exit = round(n_exit, 1),
-        n_flip = round(n_flip, 1),
+    summ = {
+        label: round(feebp, 2),
+        'n_take': round(n_take, 1),
+        'n_exit': round(n_exit, 1),
+        'n_flip': round(n_flip, 1),
 
-        n_pos = round(n_pos, 4),
-        g_pos = round(g_pos, 4),
-        holding = round(holding, 1),
-        bias = round(biaspct, 2),
-        mbias = round(mbiaspct, 2),
-        d_volume = round(d_volume, 1),
-        d_pnl = round(d_pnl, 3),
-        d_shrp = round(d_shrp, 2),
+        'n_pos': round(n_pos, 4),
+        'g_pos': round(g_pos, 4),
+        'holding': round(holding, 1),
+        'bias': round(biaspct, 2),
+        'mbias': round(mbiaspct, 2),
+        'd_volume': round(d_volume, 1),
+        'd_pnl': round(d_pnl, 3),
+        'd_shrp': round(d_shrp, 2),
 
-        sig_rat = round(sig_rat, 2),
-        w_rat = round(w_rat, 2),
-        bw_rat = round(bw_rat, 2),
-        sw_rat = round(sw_rat, 2),
-        gpt = round(gpt, 2),
-        b_gpt = round(b_gpt, 2),
-        s_gpt = round(s_gpt, 2),
-        w_mean = round(w_mean, 2),
-        w_std = round(w_std, 2),
-        l_mean = round(l_mean, 2),
-        l_std = round(l_std, 2),
-    )
+        'sig_rat': round(sig_rat, 2),
+        'w_rat': round(w_rat, 2),
+        'bw_rat': round(bw_rat, 2),
+        'sw_rat': round(sw_rat, 2),
+        'gpt': round(gpt, 2),
+        'b_gpt': round(b_gpt, 2),
+        's_gpt': round(s_gpt, 2),
+        'w_mean': round(w_mean, 2),
+        'w_std': round(w_std, 2),
+        'l_mean': round(l_mean, 2),
+        'l_std': round(l_std, 2),
+    }
     return summ
 
-def get_trade_summary(dfpnl, dfo=None, target_name=None):
+def get_trade_summary(dfpnl, dfo=None, target_name=None, label='fee'):
     '''
     Calculate stats of the trading.
 
@@ -693,15 +748,15 @@ def get_trade_summary(dfpnl, dfo=None, target_name=None):
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
         df = dfpnl[feebp]
-        summ = get_trade_summary_fee(feebp, df, dfo, target_name)
+        summ = get_trade_summary_fee(feebp, df, dfo, target_name, label)
         summ_list.append(summ)
 
-    dftsumm = pd.DataFrame(summ_list).set_index('fee')
+    dftsumm = pd.DataFrame(summ_list).set_index(label)
     return dftsumm
 
-def get_trade_summary_mp(dfpnl, dfo=None, target_name=None):
+def get_trade_summary_mp(dfpnl, dfo=None, target_name=None, label='fee'):
     '''
-    Calculate stats of the trading.
+    Calculate stats of the trading by multiprocessing. Overhead may not justify doing this.
 
     Returns:
         A dataframe.
@@ -710,14 +765,14 @@ def get_trade_summary_mp(dfpnl, dfo=None, target_name=None):
     feebp_list = dfpnl.columns.get_level_values(0).unique()
 
     pool = mp.Pool(processes=6)
-    results = [pool.apply_async(get_trade_summary_fee, args=(feebp, dfpnl[feebp], dfo, target_name))
+    results = [pool.apply_async(get_trade_summary_fee, args=(feebp, dfpnl[feebp], dfo, target_name, label))
             for feebp in feebp_list]
     pool.close()
     pool.join()
     for result in results:
         summ_list.append(result.get())
 
-    dftsumm = pd.DataFrame(summ_list).set_index('fee')
+    dftsumm = pd.DataFrame(summ_list).set_index(label)
     return dftsumm
 
 def basic_cols():
