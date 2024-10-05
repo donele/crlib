@@ -5,7 +5,7 @@ from datetime import timedelta
 
 crdata_map = {
     'default': {0: '/mnt/bigdata1/crdata',
-            20240601: '/mnt/bigdata2/crdata',
+            20240501: '/mnt/bigdata2/crdata',
              },
 }
 
@@ -34,7 +34,7 @@ def get_data_dir(dt, locale):
         os.makedirs(data_dir)
     return data_dir
 
-def read_data(datatype, dt, locale, index_col, columns=None, product=None):
+def read_data(datatype, dt, locale, index_col='t0', columns=None, product=None):
     '''
     Reads the tick data of the specified datatype for the time dt.
     '''
@@ -49,36 +49,39 @@ def read_data(datatype, dt, locale, index_col, columns=None, product=None):
     readcols = None if columns is None else product_cols + columns
     df = pd.read_parquet(path, columns=readcols)
 
-    if index_col is None:
-        pass
-    elif product is None:
+    if product is None:
         df['date'] = pd.to_datetime(df[index_col], unit='us')
         df = df.set_index(product_cols)
     else:
         df = df[(df.exchange==product[0]) & (df.symbol==product[1])]
+
+        if index_col is None or df[index_col].sum() == 0:
+            print(f'Datatype={datatype}: {index_col} is not available. Using t0.')
+            index_col = 't0'
+
         df['date'] = pd.to_datetime(df[index_col], unit='us')
         df = df.set_index('date').sort_index()
     df = df.drop(columns=[x for x in df.columns if columns is not None and x not in columns])
 
     return df
 
-def read_trade(dt, locale, index_col,
-               columns=['min_px', 'max_px', 'price', 'abs_qty', 'net_qty', 't0', 'ts'], product=None):
+def read_trade(dt, locale, index_col='t0',
+               columns=['min_px', 'max_px', 'price', 'abs_qty', 'net_qty', 't0', 'ts', 'max_xts'], product=None):
     '''
     Reads the trade data for the time dt.
     '''
     df = read_data('trade', dt, locale, index_col, columns, product)
     return df
 
-def read_bbo(dt, locale, index_col,
-             columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 'imbalance', 't0', 'ts'], product=None):
+def read_bbo(dt, locale, index_col='t0',
+             columns=['askpx', 'askqty', 'bidpx', 'bidqty', 'adj_askpx', 'adj_bidpx', 'imbalance', 't0', 'ts', 'xts'], product=None):
     '''
     Reads the bbo data for the time dt.
     '''
     df = read_data('bbo', dt, locale, index_col, columns, product)
     return df
 
-def read_midpx(dt, locale, index_col,
+def read_midpx(dt, locale, index_col='t0',
                columns=['mid_px', 'adj_width', 'adj_mid_px', 't0', 'ts'], product=None):
     '''
     Reads the midpx data for the time dt.
