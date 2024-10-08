@@ -558,7 +558,7 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
         dfmm.loc[idx, ['pos', 'buyprc', 'sellprc']] = [currpos, buyprc, sellprc]
         dfmm.loc[idx, ['pred', 'uppred', 'dnpred']] = [pred*1e4, uppred*1e4, dnpred*1e4]
 
-    dfmm.pnlcarry = (dfmm.pos * (dfo.mid.shift(-1) / dfo.mid - 1).fillna(0)
+    dfmm.pnlcarry = dfmm.pos * (dfo.mid.shift(-1) / dfo.mid - 1).fillna(0)
     dfmm.rebate = rebate * (dfmm.pos.shift() - dfmm.pos).fillna(0).abs()
     dfmm.pnl = dfmm.pnlcarry + dfmm.rebate + dfmm.pnlbuy + dfmm.pnlsell
     dfmm.columns = pd.MultiIndex.from_product([[p], dfmm.columns], names=['p', ''])
