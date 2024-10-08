@@ -17,7 +17,7 @@ def past_returns(prc, ri):
         r = (prc / prc.shift(2**ri) - 1).fillna(0).replace([np.inf, -np.inf], 0)
     return r
 
-def get_returns(df, sample_timex, min_timex, max_timex, varname, returns_func):
+def get_returns(df, sample_timex, min_timex, max_timex, varname, returns_func, col='mid', alldiff=False):
     '''
     Calculates the future returns.
 
@@ -26,7 +26,7 @@ def get_returns(df, sample_timex, min_timex, max_timex, varname, returns_func):
     '''
     serdict = {}
     for ri in range(min_timex, max_timex - 1):
-        ser = returns_func(df.mid, ri)
+        ser = returns_func(df[col], ri)
         ai = ri + sample_timex
         ser.name = f'{varname}_{ai}'
         serdict[ser.name] = ser
@@ -34,23 +34,28 @@ def get_returns(df, sample_timex, min_timex, max_timex, varname, returns_func):
     for ri in range(min_timex, max_timex - 2):
         ai = ri + sample_timex
         for rj in range(ri + 1, max_timex - 1):
-            if varname == 'ret' and rj > ri + 1:
-                continue
-            aj = rj + sample_timex
-            name1 = f'{varname}_{ai}'
-            name2 = f'{varname}_{aj}'
-            ser = serdict[name2] - serdict[name1]
-            ser.name = f'diff_{varname}_{ai}_{aj}'
-            serdict[ser.name] = ser
+            if alldiff or rj == ri + 1:
+                aj = rj + sample_timex
+                name1 = f'{varname}_{ai}'
+                name2 = f'{varname}_{aj}'
+                ser = serdict[name2] - serdict[name1]
+                ser.name = f'diff_{varname}_{ai}_{aj}'
+                serdict[ser.name] = ser
 
     serlist = list(serdict.values())
     return serlist
 
 def features_future_returns(df, sample_timex, min_timex=0, max_timex=10):
-    return get_returns(df, sample_timex, min_timex, max_timex, 'tar', returns_func=future_returns)
+    return get_returns(df, sample_timex, min_timex, max_timex, 'tar', returns_func=future_returns, alldiff=True)
 
 def features_past_returns(df, sample_timex, min_timex=0, max_timex=10):
-    return get_returns(df, sample_timex, min_timex, max_timex, 'ret', returns_func=past_returns)
+    return get_returns(df, sample_timex, min_timex, max_timex, 'ret', returns_func=past_returns, alldiff=False)
+
+def features_qimb(df, sample_timex, min_timex=0, max_timex=10):
+    return get_returns(df, sample_timex, min_timex, max_timex, 'qimbret', returns_func=past_returns, col='qimb', alldiff=False)
+
+def features_sprdrat(df, sample_timex, min_timex=0, max_timex=10):
+    return get_returns(df, sample_timex, min_timex, max_timex, 'sprdratret', returns_func=past_returns, col='sprdrat', alldiff=False)
 
 def get_timegroup(tser, sample_interval):
     '''
@@ -103,38 +108,45 @@ def make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex=Non
     '''
     sample_interval = int(2**int(sample_timex))
 
+    dft['tlat'] = dft.t0 - dft.max_xts
+
     tgrp = get_timegroup(dft[index_col], sample_interval)
     dftagg = dft.groupby(tgrp).agg(
-        price=('price', 'last'),
-        avg_price=('price', 'mean'),
-        min_price=('min_px', 'min'),
-        max_price=('max_px', 'max'),
-        sum_avg_qty=('abs_qty', 'sum'),
-        sum_net_qty=('net_qty', 'sum'),
-        last_trade=('price', lambda x: x.index[-1]),
+        tlat = ('tlat', 'last'),
+        price = ('price', 'last'),
+        avg_price = ('price', 'mean'),
+        min_price = ('min_px', 'min'),
+        max_price = ('max_px', 'max'),
+        sum_avg_qty = ('abs_qty', 'sum'),
+        sum_net_qty = ('net_qty', 'sum'),
+        last_trade = ('price', lambda x: x.index[-1]),
     )
     if verbose:
         print(dftagg)
 
     dfb['qimb'] = ((dfb.askqty - dfb.bidqty) / (dfb.askqty + dfb.bidqty)).fillna(0).replace([np.inf, -np.inf], 0)
-    dfb['width'] = (dfb.askpx - dfb.bidpx) / (.5*dfb.askpx + .5*dfb.bidpx)
+    dfb['width'] = (dfb.askpx - dfb.bidpx)
+    dfb['sprdrat'] = (dfb.askpx - dfb.bidpx) / (.5*dfb.askpx + .5*dfb.bidpx)
+    dfb['blat'] = dfb.t0 - dfb.xts
 
     bgrp = get_timegroup(dfb[index_col], sample_interval)
     dfbagg = dfb.groupby(bgrp).agg(
-        qimb=('qimb', 'last'),
-        askpx=('askpx', 'last'),
-        bidpx=('bidpx', 'last'),
-        width=('width', 'last'),
-        adj_askpx=('adj_askpx', 'last'),
-        adj_bidpx=('adj_bidpx', 'last'),
-        max_askqty=('askqty', 'max'),
-        max_bidqty=('bidqty', 'max'),
+        blat = ('blat', 'last'),
+        qimb = ('qimb', 'last'),
+        askpx = ('askpx', 'last'),
+        bidpx = ('bidpx', 'last'),
+        width = ('width', 'last'),
+        sprdrat = ('sprdrat', 'last'),
+        adj_askpx = ('adj_askpx', 'last'),
+        adj_bidpx = ('adj_bidpx', 'last'),
+        max_askqty = ('askqty', 'max'),
+        max_bidqty = ('bidqty', 'max'),
     )
 
     mgrp = get_timegroup(dfm[index_col], sample_interval)
     dfmagg = dfm.groupby(mgrp).agg(
-        adj_width=('adj_width', 'last'),
-        adj_mid_px=('adj_mid_px', 'last'),
+        adj_width = ('adj_width', 'last'),
+        adj_mid_px = ('adj_mid_px', 'last'),
     )
 
     # Merge trade and bbo
@@ -173,6 +185,10 @@ def make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex=Non
 
     ## Past returns
     serlst.extend(features_past_returns(df, sample_timex, min_timex, max_timex))
+
+    if False: # Can be turn on as needed.
+        serlst.extend(features_qimb(df, sample_timex, min_timex, max_timex))
+        serlst.extend(features_sprdrat(df, sample_timex, min_timex, max_timex))
 
     ## Median qimb
 
