@@ -385,7 +385,7 @@ def read_oos(st, et, par, predpar):
 
     feature_dir = predpar['feature_dir'] if 'feature_dir' in predpar else get_feature_dir(par)
     read_targets = list(set(targets + [predpar['target_name']]))
-    dfo = read_features(st, et, feature_dir, columns=['mid', 'adj_width', 'valid', 'tsince_trade'] + read_targets)
+    dfo = read_features(st, et, feature_dir, columns=['mid', 'adj_width', 'valid', 'tsince_trade', 'tlat', 'blat', 'twret_13'] + read_targets)
 
     pred_list = []
     for t, d in zip(targets, descs):
@@ -486,56 +486,83 @@ def get_pnl(dfo, target_name, feebp):
     entry.name = (feebp, 'entry')
     return pnl, pos, entry
 
-def get_mm_pnl(dfo, target_name, rebatebp=0.5, thresbp=.2):
-    thres = thresbp * 1e-4
+def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
+    class PredRange:
+        def __init__(self, dfo, nq=20):
+            qc = pd.qcut(dfo.pred, nq)
+            gr = dfo.groupby(qc).tar_22.agg(['mean', 'std'])
+            grx = dfo.groupby(qc).pred.mean()
+            self.upcoef = np.polyfit(grx, gr['mean'] + gr['std'], 2)
+            self.dncoef = np.polyfit(grx, gr['mean'] - gr['std'], 2)
+        def upper(self, pred, p, wgt=0):
+            coef = self.upcoef
+            std = coef[0] * pred**2 + coef[1] * pred + coef[2] - pred
+            return pred + p * std * (1 + wgt*1e4 * abs(pred))
+        def lower(self, pred, p, wgt=0):
+            coef = self.dncoef
+            std = pred - (coef[0] * pred**2 + coef[1] * pred + coef[2])
+            return pred - p * std * (1 + wgt*1e4 * abs(pred))
+    pr = PredRange(dfo)
+
     rebate = rebatebp * 1e-4
 
-    order = pd.Series(0, index=dfo.index)
-    pos = pd.Series(0, index=dfo.index)
-    entry = pd.Series(False, index=dfo.index)
-    pnlentry = pd.Series(0, index=dfo.index)
+    dfmm = pd.DataFrame({'pos': 0, 'buyprc': 0, 'sellprc': 1e9, 'pred': 0, 'uppred': 0, 'dnpred': 0,
+        'pnlcarry': 0, 'pnlbuy': 0, 'pnlsell': 0, 'rebate': 0, 'pnl': 0}, index=dfo.index)
 
-    ordsize = 0
-    ordprc = 0
+    buysize = 0
+    buyprc = 0
+    sellsize = 0
+    sellprc = 1e9
     currpos = 0
     for idx, row in dfo.iterrows():
         pred = row.pred
-        # Fill
-        if ordsize > 0:
-            if ordprc >= row.mid: # buy
-                currpos += ordsize
-                ordsize = 0
-                entry[idx] = True
-                pnlentry[idx] += (row.mid / ordprc - 1)
-        elif ordsize < 0:
-            if ordprc <= row.mid: # sell
-                currpos += ordsize
-                ordsize = 0
-                entry[idx] = True
-                pnlentry[idx] -= (row.mid / ordprc - 1)
+        uppred = pr.upper(pred, p, wgt)
+        dnpred = pr.lower(pred, p, wgt)
 
-        pos[idx] = currpos
-        buymargin = pred + rebate
-        sellmargin = -pred + rebate
+        if buysize > 0 and buyprc > row.mid: # Buy Fill
+            currpos += buysize
+            dfmm.loc[idx, 'pnlbuy'] = (row.mid / buyprc - 1)
+            buysize = 0
+            buyprc = 0
 
-        if currpos <= 0 and buymargin > thres and buymargin > sellmargin: # Buy
-            ordsize = 1
-            ordprc = row.mid * (1 - buymargin - thres)
-        elif currpos >= 0 and sellmargin > thres and sellmargin > buymargin: # Sell
-            ordsize = -1
-            ordprc = row.mid * (1 + sellmargin + thres)
+        if sellsize > 0 and sellprc < row.mid: # Sell Fill
+            currpos -= sellsize
+            dfmm.loc[idx, 'pnlsell'] = -(row.mid / sellprc - 1)
+            sellsize = 0
+            sellprc = 0
 
-        if buymargin < 0 and sellmargin < 0:
-            ordsize = 0
-        order[idx] = ordsize
+        if row.tlat > 10000: # Cancel if trade latency > 10ms
+            buysize = 0
+            buyprc = 0
+            sellsize = 0
+            sellprc = 0
+        else:
+            buyprc0 = min(row.mid - 0.1, row.mid * (1 + dnpred))
+            sellprc0 = max(row.mid + 0.1, row.mid * (1 + uppred))
+            prcok = buyprc0 < sellprc0
 
-    pnl = pos * (dfo.mid.shift(-1)/dfo.mid - 1).fillna(0) + (pos.shift() - pos).fillna(0).abs()*rebate
-    pnl += pnlentry
-    pnl.name = (thresbp, 'pnl')
-    pos.name = (thresbp, 'pos')
-    entry.name = (thresbp, 'entry')
-    order.name = (thresbp, 'order')
-    return pnl, pos, entry, order
+            if prcok and currpos <= 0: # Buy Order
+                buysize = 1
+                buyprc = buyprc0
+            else:
+                buysize = 0
+                buyprc = 0
+
+            if prcok and currpos >= 0: # Sell Order
+                sellsize = 1
+                sellprc = sellprc0
+            else:
+                sellsize = 0
+                sellprc = 0
+
+        dfmm.loc[idx, ['pos', 'buyprc', 'sellprc']] = [currpos, buyprc, sellprc]
+        dfmm.loc[idx, ['pred', 'uppred', 'dnpred']] = [pred*1e4, uppred*1e4, dnpred*1e4]
+
+    dfmm.pnlcarry = (dfmm.pos * (dfo.mid.shift(-1) / dfo.mid - 1).fillna(0)
+    dfmm.rebate = rebate * (dfmm.pos.shift() - dfmm.pos).fillna(0).abs()
+    dfmm.pnl = dfmm.pnlcarry + dfmm.rebate + dfmm.pnlbuy + dfmm.pnlsell
+    dfmm.columns = pd.MultiIndex.from_product([[p], dfmm.columns], names=['p', ''])
+    return dfmm
 
 def get_aggpnl(pnl):
     '''
@@ -599,25 +626,11 @@ def get_pnls(dfo, target_name, feebp_list):
 def get_mm_pnls(dfo, target_name, thresbp_list, rebatebp=0.5):
     cols = []
     for thresbp in thresbp_list:
-        pnl, pos, entry, order = get_mm_pnl(dfo, target_name, rebatebp, thresbp)
-        if pnl is not None:
-            cols.append(pnl)
-            cols.append(pos)
-            cols.append(entry)
-            cols.append(order)
-
-    aggcols = []
-    pool = mp.Pool(processes=6)
-    results = [pool.apply_async(get_aggpnl, args=(pnl,)) for pnl in cols if pnl is not None and pnl.name is not None and pnl.name[1] == 'pnl']
-    pool.close()
-    pool.join()
-    for res in results:
-        aggcols.append(res.get())
-
+        dfmm = get_mm_pnl(dfo, target_name, rebatebp, thresbp)
+        if dfmm is not None:
+            cols.append(dfmm)
     df = pd.concat(cols, axis=1)
-    dfagg = pd.concat(aggcols, axis=1) if len(aggcols) > 0 else None
-    return df, dfagg
-    #return df
+    return df
 
 def get_daily_sharpe(pnl):
     '''
@@ -666,7 +679,7 @@ def get_trade_summary_fee(feebp, df, dfo, target_name, label):
 
     pos = df['pos'].fillna(0)
     pnl = df['pnl'].fillna(0)
-    entry = df['entry'].fillna(False)
+    entry = df['entry'].fillna(False) if 'entry' in df.columns else pd.Series(False, index=pos.index)
 
     ndays = (pos.index[-1] - pos.index[0]).total_seconds()/60/60/24
 
