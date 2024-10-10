@@ -490,7 +490,7 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
     class PredRange:
         def __init__(self, dfo, nq=20):
             qc = pd.qcut(dfo.pred, nq)
-            gr = dfo.groupby(qc).tar_22.agg(['mean', 'std'])
+            gr = dfo.groupby(qc)[target_name].agg(['mean', 'std'])
             grx = dfo.groupby(qc).pred.mean()
             self.upcoef = np.polyfit(grx, gr['mean'] + gr['std'], 2)
             self.dncoef = np.polyfit(grx, gr['mean'] - gr['std'], 2)
@@ -581,29 +581,16 @@ def get_aggpnl(pnl):
         hr_in_ns = int(60*60*1e9)
         hr_to_us = int(60*60*1e6)
         aggpnl = pnl.groupby(pd.to_datetime(pnl.index.astype(int)//hr_in_ns*hr_to_us, unit='us')).sum()
-    else:
+    elif time_range > timedelta(minutes=100):
         min_in_ns = int(60*1e9)
         min_to_us = int(60*1e6)
         aggpnl = pnl.groupby(pd.to_datetime(pnl.index.astype(int)//min_in_ns*min_to_us, unit='us')).sum()
+    else:
+        sec_in_ns = int(1e9)
+        sec_to_us = int(1e6)
+        aggpnl = pnl.groupby(pd.to_datetime(pnl.index.astype(int)//sec_in_ns*sec_to_us, unit='us')).sum()
 
     return aggpnl
-
-def get_pnls_sp(dfo, target_name, feebp_list):
-    '''
-    Calculates multiple pnl series using the trading fees passed from the caller.
-
-    Returns:
-        Dataframe with a multiindex column. The first level of the multiindex column is
-        the trading fee in basis points. The second level is ('pnl', 'position').
-    '''
-    cols = []
-    for feebp in feebp_list:
-        pnl, pos, entry = get_pnl(dfo, target_name, feebp)
-        cols.append(pnl)
-        cols.append(pos)
-        cols.append(entry)
-    df = pd.concat(cols, axis=1)
-    return df
 
 def get_pnls(dfo, target_name, feebp_list):
     '''
@@ -623,13 +610,28 @@ def get_pnls(dfo, target_name, feebp_list):
     df = pd.concat(cols, axis=1)
     return df
 
+def get_mm_pnls_mp(dfo, target_name, thresbp_list, rebatebp=0.5):
+    pnls = []
+
+    pool = mp.Pool(processes=6)
+    results = [pool.apply_async(get_mm_pnl, args=(dfo, target_name, rebatebp, thresbp))
+            for thresbp in thresbp_list]
+    pool.close()
+    pool.join()
+    for result in results:
+        pnl = result.get()
+        if pnl is not None:
+            pnls.append(pnl)
+    df = pd.concat(pnls, axis=1)
+    return df
+
 def get_mm_pnls(dfo, target_name, thresbp_list, rebatebp=0.5):
-    cols = []
+    pnls = []
     for thresbp in thresbp_list:
         dfmm = get_mm_pnl(dfo, target_name, rebatebp, thresbp)
         if dfmm is not None:
-            cols.append(dfmm)
-    df = pd.concat(cols, axis=1)
+            pnls.append(dfmm)
+    df = pd.concat(pnls, axis=1)
     return df
 
 def get_daily_sharpe(pnl):
@@ -658,7 +660,7 @@ def plot_pnl(dfpnl, label='fee'):
     for feebp in feebp_list:
         pnl = dfpnl[feebp]['pnl']
         aggpnl = get_aggpnl(pnl)
-        plt.plot(aggpnl.cumsum(), label=f'{label}={feebp}bp')
+        plt.plot(aggpnl.cumsum(), label=f'{label}={feebp}')
     plt.title('cumulative pnl')
     plt.ylabel('pnl')
     plt.xticks(rotation=20)
