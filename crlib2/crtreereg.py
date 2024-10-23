@@ -57,8 +57,8 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', features=None, feature_gro
         or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
         return model
 
-    if feature_groups is None:
-        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
+    #if feature_groups is None:
+        #feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
 
     allfeatures = [x for x in dft.columns if np.any([x.startswith(g) for g in feature_groups])] if features is None else features
 
@@ -67,8 +67,8 @@ def lgbreg_tune(target_name, dft, dfv, metric='rmse', features=None, feature_gro
 
     print(f'Total {len(allfeatures)} features: {allfeatures}')
 
-    n_rep = 18
-    n_sim = 40
+    n_rep = 2
+    n_sim = 60
     selection_early_stop = True
 
     max_best_va = 0

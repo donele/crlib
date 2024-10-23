@@ -42,8 +42,8 @@ def linreg_tune(target_name, dft, dfv, metric='r2', feature_groups=None,
         or dfv.loc[dfv.valid].shape[0] < min_data_cnt):
         return best_model
 
-    if feature_groups is None:
-        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
+    #if feature_groups is None:
+        #feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret']
 
     allfeatures = [x for x in dft.columns if np.any([x.startswith(g+'_') for g in feature_groups])]
     if not debug_nfeature is None:
