@@ -10,6 +10,7 @@ import pickle
 import seaborn as sns
 import yaml
 from datetime import timedelta
+import pyarrow.parquet as pq
 
 from .crdataio import *
 from .crfeatures import *
@@ -62,94 +63,13 @@ def get_timeindex(interval):
 
 ### Features
 
-def get_reg_features_3h(dt1, par, min_timex=None, max_timex=None):
-    '''
-    Calculate the features in a three hour period, then truncate to oen hour period.
-    '''
-    index_col = par['index_col'] if 'index_col' in par else None
-    mid_col = par['mid_col'] if 'mid_col' in par else None
-    sample_timex = par['sample_timex'] if 'sample_timex' in par else par['grid_timex'] if 'grid_timex' in par else None
-
-    dft = read_3h('trade', dt1, par)
-    dfb = read_3h('bbo', dt1, par)
-    dfm = read_3h('midpx', dt1, par)
-    if dft is None or dfb is None or dfm is None:
-        return None
-    df = make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex, max_timex)
-    return df
-
-def get_tevt_features_3h(dt, par, min_timex=None, max_timex=None):
-    '''
-    Calculate the features in a three hour period, then truncate to oen hour period.
-    '''
-    if min_timex is None:
-        min_timex = par['min_feature_timex'] - par['grid_timex']
-    dff = get_reg_features_3h(dt, par, min_timex, max_timex)
-
-    dft = read_3h('trade', dt, par)
-
-    # Time weighted moving average
-    min_twma_timex = 10
-    max_twma_timex = 30
-    timex_list = np.array(range(min_twma_timex, max_twma_timex))
-    dfma = pd.DataFrame(columns=[f'twma_{x}' for x in timex_list], index=dft.index)
-    dfma.iloc[0] = dft.price[0]
-    timeconsts = np.array([2.0**x for x in timex_list])
-    timediff = dft.t0.diff().fillna(0)
-    prc = dft.price
-
-    # Price MA
-    for i in range(1, len(dft)):
-        dfma.iloc[i] = dfma.iloc[i-1] + np.minimum(timeconsts, timediff.iloc[i]) / timeconsts * (prc[i] - dfma.iloc[i-1])
-
-    # twret
-    twret = pd.DataFrame((dft.price.to_numpy().reshape(-1,1) / dfma.to_numpy() - 1),
-                    index=dft.index, columns=[f'twret_{x}' for x in timex_list]).fillna(0)
-    del dfma
-    dft = pd.concat([dft, twret], axis=1)
-
-    # Determine samples and drop non-sample trades
-    dft['sample'] = False
-    dft = dft.loc[~dft.index.duplicated(keep='first')]
-    last_sample = 0
-    for idx, row in dft.iterrows():
-        if row.t0 > last_sample + 5000:
-            dft.loc[idx, 'sample'] = True
-            last_sample = row.t0
-    dft = dft[dft['sample']]
-
-    # Merge grid and trade, ffill, then select samples only
-    dfmer = pd.merge(dff, dft, how='outer', left_index=True, right_index=True, suffixes=('', '_trd'))
-    dfmer[dff.columns] = dfmer[dff.columns].ffill()
-    dfmer = dfmer[(dfmer['valid'].shift() == True)&(dfmer['sample'] == True)]
-
-    # Recalculate ret
-    retnames = [x for x in dfmer.columns if x.startswith('ret_')]
-    retidxlist = [int(x[-2:]) for x in retnames if len(x) == 6 and x[3] == '_']
-    for name in retnames:
-        dfmer[name] *= dfmer.price_trd / dfmer.price
-        dfmer[name] += dfmer.price_trd / dfmer.price - 1
-
-    # Recalculate tar
-    tarnames = [x for x in dfmer.columns if x.startswith('tar_')]
-    for name in tarnames:
-        dfmer[name] *= dfmer.price / dfmer.price_trd
-        dfmer[name] += dfmer.price / dfmer.price_trd - 1
-
-    return dfmer
-
-def get_features_3h(dt, par, min_timex=None, max_timex=None):
-    df = None
-    if 'sample_type' in par and par['sample_type'] == 'tevt':
-        df = get_tevt_features_3h(dt, par)
-    else:
-        df = get_reg_features_3h(dt, par)
-    return df
-
-def get_features_1h(dt, par, min_timex=None, max_timex=None):
+def get_features_1h(dt, par, min_timex=None, max_timex=None, tevt_max_row=18000):
     df = get_features_3h(dt, par, min_timex, max_timex)
-    dt2 = dt + timedelta(hours=1, microseconds=-1)
-    df = df.loc[dt:dt2]
+    if df is not None:
+        dt2 = dt + timedelta(hours=1, microseconds=-1)
+        df = df.loc[dt:dt2]
+        if 'sample_type' in par and par['sample_type'] == 'tevt':
+            df = df.iloc[np.unique(np.arange(0, len(df)-1, len(df)/tevt_max_row).astype(int))]
     return df
 
 def write_feature(dt, par):
@@ -166,7 +86,7 @@ def write_feature(dt, par):
         df0.to_parquet(f'{feature_dir}/{yyyymmdd}.{hh:02d}.parquet')
     return df0.shape if df0 is not None else None
 
-def read_features(dt1, dt2, feature_dir, columns=None):
+def read_features(dt1, dt2, feature_dir, columns=None, feature_groups=None):
     '''
     Reads the features data in the time range between dt1 and dt2.
 
@@ -183,7 +103,19 @@ def read_features(dt1, dt2, feature_dir, columns=None):
         if not os.path.exists(path):
             print(path, ' not found.')
             continue
-        df = pd.read_parquet(path, columns=columns)
+
+        available_columns = pq.read_table(path).schema.names
+        read_columns = []
+        default_columns = ['mid', 'adj_width', 'valid', 'tsince_trade', 'tlat', 'blat']
+        read_columns.extend([x for x in default_columns if x in available_columns])
+        if columns is not None:
+            read_columns.extend([x for x in columns if x in available_columns])
+        if feature_groups is not None:
+            for g in feature_groups:
+                read_columns.extend([x for x in available_columns if x.startswith(g)])
+        read_columns = list(set(read_columns))
+
+        df = pd.read_parquet(path, columns=read_columns)
         if df is not None and df.shape[0] > 0:
             dflist.append(df)
     if len(dflist) > 0:
@@ -245,8 +177,8 @@ def oos(par, fitpar, dtt, dtv, dto, dte, fit_func, metric='r2', feature_groups=N
         Series of predictions.
     '''
     feature_dir = fitpar['feature_dir'] if 'feature_dir' in fitpar else get_feature_dir(par)
-    dft = read_features(dtt, dtv, feature_dir)
-    dfv = read_features(dtv, dto, feature_dir)
+    dft = read_features(dtt, dtv, feature_dir, columns=[fitpar['target_name']], feature_groups=feature_groups)
+    dfv = read_features(dtv, dto, feature_dir, columns=[fitpar['target_name']], feature_groups=feature_groups)
     if dft is None or dfv is None or len(dft) < 1 or len(dfv) < 1:
         return None
 
@@ -311,15 +243,20 @@ def rolling_oos(par, fitpar, st, et, metric='r2', feature_groups=None,
 
 def oos_linear(par, fitpar, dtt, dtv, dto, dte, metric='r2', feature_groups=None,
         features=None, verbose=False, debug_nfeature=None, do_write_pred=True):
+    if feature_groups is None:
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret'],
     return oos(par, fitpar, dtt, dtv, dto, dte, fit_func=train_linear, metric=metric, feature_groups=feature_groups,
             features=features, verbose=verbose, debug_nfeature=debug_nfeature, do_write_pred=do_write_pred)
 
 def oos_tree(par, fitpar, dtt, dtv, dto, dte, metric='rmse', feature_groups=None,
         features=None, verbose=False, debug_nfeature=None, do_write_pred=True):
+    if feature_groups is None:
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty']
     return oos(par, fitpar, dtt, dtv, dto, dte, fit_func=train_tree, metric=metric, feature_groups=feature_groups,
             features=features, verbose=verbose, debug_nfeature=debug_nfeature, do_write_pred=do_write_pred)
 
-def rolling_oos_linear(par, fitpar, st, et, metric='r2', feature_groups=None,
+def rolling_oos_linear(par, fitpar, st, et, metric='r2',
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret'],
         features=None, verbose=False, debug_nfeature=None):
     '''
     Repeat the linear regression with the sliding windows.
@@ -330,7 +267,8 @@ def rolling_oos_linear(par, fitpar, st, et, metric='r2', feature_groups=None,
     rolling_oos(par, fitpar, st, et, metric=metric, feature_groups=feature_groups,
         features=features, verbose=verbose, debug_nfeature=debug_nfeature, oos_func=oos_linear)
 
-def rolling_oos_tree(par, fitpar, st, et, metric='r2', feature_groups=None,
+def rolling_oos_tree(par, fitpar, st, et, metric='r2',
+        feature_groups=['ret', 'medqimb', 'qimax', 'hilo', 'twret', 'diff_sum_net_qty'],
         features=None, verbose=False, debug_nfeature=None):
     '''
     Repeat the boosted tree regression with the sliding windows.
@@ -385,7 +323,7 @@ def read_oos(st, et, par, predpar):
 
     feature_dir = predpar['feature_dir'] if 'feature_dir' in predpar else get_feature_dir(par)
     read_targets = list(set(targets + [predpar['target_name']]))
-    dfo = read_features(st, et, feature_dir, columns=['mid', 'adj_width', 'valid', 'tsince_trade', 'tlat', 'blat', 'twret_13'] + read_targets)
+    dfo = read_features(st, et, feature_dir, columns=['mid', 'adj_width', 'valid', 'tsince_trade', 'tlat', 'blat'] + read_targets)
 
     pred_list = []
     for t, d in zip(targets, descs):
@@ -456,7 +394,9 @@ def get_pnl(dfo, target_name, feebp):
     Any change to this function should be rigorously tested.
 
     Returns:
-        Series of pnl and position.
+        pnl: pd.Series (required for trade_summary())
+        pos: pd.Series (required for trade_summary())
+        entry: pd.Series (optional for trade_summary())
     '''
     # entry
     fee = feebp * 1e-4
@@ -479,34 +419,40 @@ def get_pnl(dfo, target_name, feebp):
     pos = pos.ffill().fillna(0)
 
     # pnl
-    pnl = pos * (dfo.mid.shift(-1)/dfo.mid - 1).fillna(0) - (pos.shift() - pos).fillna(0).abs()*cost
+    pnlcarry = (pos * (dfo.mid.shift(-1)/dfo.mid - 1).fillna(0)).shift()
+    pnlinsert = - (pos.shift() - pos).fillna(0).abs()*cost
+    pnl = pnlcarry + pnlinsert
 
     pnl.name = (feebp, 'pnl')
     pos.name = (feebp, 'pos')
     entry.name = (feebp, 'entry')
     return pnl, pos, entry
 
-def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
-    class PredRange:
-        def __init__(self, dfo, nq=20):
-            qc = pd.qcut(dfo.pred, nq)
-            gr = dfo.groupby(qc)[target_name].agg(['mean', 'std'])
-            grx = dfo.groupby(qc).pred.mean()
-            self.upcoef = np.polyfit(grx, gr['mean'] + gr['std'], 2)
-            self.dncoef = np.polyfit(grx, gr['mean'] - gr['std'], 2)
-        def upper(self, pred, p, wgt=0):
-            coef = self.upcoef
-            std = coef[0] * pred**2 + coef[1] * pred + coef[2] - pred
-            return pred + p * std * (1 + wgt*1e4 * abs(pred))
-        def lower(self, pred, p, wgt=0):
-            coef = self.dncoef
-            std = pred - (coef[0] * pred**2 + coef[1] * pred + coef[2])
-            return pred - p * std * (1 + wgt*1e4 * abs(pred))
-    pr = PredRange(dfo)
+class PredRange:
+    def __init__(self, dfo, target_name, ticksize=0.1, nq=20):
+        self.ticksize = ticksize
+        qc = pd.qcut(dfo.pred, nq)
+        gr = dfo.groupby(qc)[target_name].agg(['mean', 'std'])
+        grx = dfo.groupby(qc).pred.mean()
+        self.coef = np.polyfit(grx, gr['std'], 2)
+    def get_std(self, pred):
+        c = self.coef
+        std = c[0] * pred**2 + c[1] * pred + c[2]
+        return std
+    def pred_range(self, pred, p, q, r):
+        d = (q + r) * self.get_std(pred)
+        return p * pred - d, p * pred + d
+    def buy_sell_prc(self, mid, pred, p, q, r):
+        pred_range = self.pred_range(pred, p, q, r)
+        buyprc = min(mid - self.ticksize, mid * (1 + pred_range[0]))
+        sellprc = max(mid + self.ticksize, mid * (1 + pred_range[1]))
+        return buyprc, sellprc
 
+def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, q=1, r=0, pr=None):
     rebate = rebatebp * 1e-4
-
-    dfmm = pd.DataFrame({'pos': 0, 'buyprc': 0, 'sellprc': 1e9, 'pred': 0, 'uppred': 0, 'dnpred': 0,
+    if pr is None:
+        pr = PredRange(dfo, target_name)
+    dfmm = pd.DataFrame({'mid': 0, 'pos': 0, 'buyprc': 0, 'sellprc': 1e9, 'pred': 0, 'uppred': 0, 'dnpred': 0,
         'pnlcarry': 0, 'pnlbuy': 0, 'pnlsell': 0, 'rebate': 0, 'pnl': 0}, index=dfo.index)
 
     buysize = 0
@@ -516,15 +462,15 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
     currpos = 0
     for idx, row in dfo.iterrows():
         pred = row.pred
-        uppred = pr.upper(pred, p, wgt)
-        dnpred = pr.lower(pred, p, wgt)
+        pred_range = pr.pred_range(pred, p, q, r)
+        uppred = pred_range[0]
+        dnpred = pred_range[1]
 
         if buysize > 0 and buyprc > row.mid: # Buy Fill
             currpos += buysize
             dfmm.loc[idx, 'pnlbuy'] = (row.mid / buyprc - 1)
             buysize = 0
             buyprc = 0
-
         if sellsize > 0 and sellprc < row.mid: # Sell Fill
             currpos -= sellsize
             dfmm.loc[idx, 'pnlsell'] = -(row.mid / sellprc - 1)
@@ -537,8 +483,7 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
             sellsize = 0
             sellprc = 0
         else:
-            buyprc0 = min(row.mid - 0.1, row.mid * (1 + dnpred))
-            sellprc0 = max(row.mid + 0.1, row.mid * (1 + uppred))
+            buyprc0, sellprc0 = pr.buy_sell_prc(row.mid, pred, p, q, r)
             prcok = buyprc0 < sellprc0
 
             if prcok and currpos <= 0: # Buy Order
@@ -555,13 +500,13 @@ def get_mm_pnl(dfo, target_name, rebatebp=0.5, p=1, wgt=0):
                 sellsize = 0
                 sellprc = 0
 
-        dfmm.loc[idx, ['pos', 'buyprc', 'sellprc']] = [currpos, buyprc, sellprc]
+        dfmm.loc[idx, ['mid', 'pos', 'buyprc', 'sellprc']] = [row.mid, currpos, buyprc, sellprc]
         dfmm.loc[idx, ['pred', 'uppred', 'dnpred']] = [pred*1e4, uppred*1e4, dnpred*1e4]
 
-    dfmm.pnlcarry = dfmm.pos * (dfo.mid.shift(-1) / dfo.mid - 1).fillna(0)
+    dfmm.pnlcarry = (dfmm.pos * (dfo.mid.shift(-1) / dfo.mid - 1).fillna(0)).shift()
     dfmm.rebate = rebate * (dfmm.pos.shift() - dfmm.pos).fillna(0).abs()
     dfmm.pnl = dfmm.pnlcarry + dfmm.rebate + dfmm.pnlbuy + dfmm.pnlsell
-    dfmm.columns = pd.MultiIndex.from_product([[p], dfmm.columns], names=['p', ''])
+    dfmm.columns = pd.MultiIndex.from_product([[q], dfmm.columns], names=['q', ''])
     return dfmm
 
 def get_aggpnl(pnl):
@@ -610,12 +555,12 @@ def get_pnls(dfo, target_name, feebp_list):
     df = pd.concat(cols, axis=1)
     return df
 
-def get_mm_pnls_mp(dfo, target_name, thresbp_list, rebatebp=0.5):
+def get_mm_pnls_mp(dfo, target_name, rebatebp=0.5, p=1, q_list=[1], r=0, pr=None):
     pnls = []
 
     pool = mp.Pool(processes=6)
-    results = [pool.apply_async(get_mm_pnl, args=(dfo, target_name, rebatebp, thresbp))
-            for thresbp in thresbp_list]
+    results = [pool.apply_async(get_mm_pnl, args=(dfo, target_name, rebatebp, p, q, r, pr))
+            for q in q_list]
     pool.close()
     pool.join()
     for result in results:
@@ -625,10 +570,10 @@ def get_mm_pnls_mp(dfo, target_name, thresbp_list, rebatebp=0.5):
     df = pd.concat(pnls, axis=1)
     return df
 
-def get_mm_pnls(dfo, target_name, thresbp_list, rebatebp=0.5):
+def get_mm_pnls(dfo, target_name, rebatebp=0.5, p=1, q_list=[1], r=0, pr=None):
     pnls = []
-    for thresbp in thresbp_list:
-        dfmm = get_mm_pnl(dfo, target_name, rebatebp, thresbp)
+    for q in q_list:
+        dfmm = get_mm_pnl(dfo, target_name, rebatebp, p=p, q=q, r=r, pr=pr)
         if dfmm is not None:
             pnls.append(dfmm)
     df = pd.concat(pnls, axis=1)
@@ -651,25 +596,32 @@ def get_daily_sharpe(pnl):
         d_shrp = pnlmean / pnlstd * dfac
     return d_shrp
 
-def plot_pnl(dfpnl, label='fee'):
+def plot_pnl(dfpnl, col='pnl', cum=True, label='fee', figsize=None):
     '''
     Plots the cumulative pnl.
     '''
-    plt.figure()
+    if figsize is None:
+        plt.figure()
+    else:
+        plt.figure(figsize=figsize)
     feebp_list = dfpnl.columns.get_level_values(0).unique()
     for feebp in feebp_list:
-        pnl = dfpnl[feebp]['pnl']
+        pnl = dfpnl[feebp][col]
         aggpnl = get_aggpnl(pnl)
-        plt.plot(aggpnl.cumsum(), label=f'{label}={feebp}')
-    plt.title('cumulative pnl')
-    plt.ylabel('pnl')
+        if cum:
+            plt.plot(aggpnl.cumsum(), label=f'{label}={feebp}')
+        else:
+            plt.plot(aggpnl, label=f'{label}={feebp}')
+    if cum:
+        plt.title(f'cumulative {col}')
+    else:
+        plt.title(f'{col}')
+    plt.ylabel(f'{col}')
     plt.xticks(rotation=20)
     plt.grid()
     plt.legend()
 
 def get_holding_summary(dfpnl, dfo):
-
-
     pass
 
 def get_trade_summary_fee(feebp, df, dfo, target_name, label):
@@ -700,7 +652,8 @@ def get_trade_summary_fee(feebp, df, dfo, target_name, label):
     holding = dfpos.loc[dfpos.val!=0, 'len'].mean() * sample_interval # average holding
     median_holding = dfpos.loc[dfpos.val!=0, 'len'].median() * sample_interval # median holding
 
-    d_volume = (pos - pos.shift()).abs().sum()/ndays # daily volume
+    volume = (pos - pos.shift()).abs().sum()
+    d_volume = volume / ndays # daily volume
     d_pnl = pnl.sum() / ndays
     d_shrp = get_daily_sharpe(pnl)
 
@@ -716,9 +669,9 @@ def get_trade_summary_fee(feebp, df, dfo, target_name, label):
     dfts = dft[dft.pos < 0]
     sw_rat = len(dfts[dfts.pnl > 0]) / len(dftb) if len(dftb) > 0 else 0
 
-    gpt = dft.pnl.mean()*1e4
-    b_gpt = dft[dft.pos > 0].pnl.mean()*1e4
-    s_gpt = dft[dft.pos < 0].pnl.mean()*1e4
+    gpt = 1e4 * dft.pnl.sum() / volume
+    b_gpt = 0# dft[dft.pos > 0].pnl.mean()*1e4
+    s_gpt = 0#dft[dft.pos < 0].pnl.mean()*1e4
     (w_mean, w_std) = dft[dft.pnl>0].pnl.agg(['mean', 'std'])*1e4
     (l_mean, l_std) = dft[dft.pnl<0].pnl.agg(['mean', 'std'])*1e4
 
@@ -746,9 +699,9 @@ def get_trade_summary_fee(feebp, df, dfo, target_name, label):
         'w_rat': round(w_rat, 2),
         'bw_rat': round(bw_rat, 2),
         'sw_rat': round(sw_rat, 2),
-        'gpt': round(gpt, 2),
-        'b_gpt': round(b_gpt, 2),
-        's_gpt': round(s_gpt, 2),
+        'gpt': round(gpt, 4),
+        'b_gpt': round(b_gpt, 4),
+        's_gpt': round(s_gpt, 4),
         'w_mean': round(w_mean, 2),
         'w_std': round(w_std, 2),
         'l_mean': round(l_mean, 2),
@@ -846,3 +799,142 @@ def plot_trade(dt, span, dft, dfb, dfm):
     plt.grid()
     plt.legend()
 
+### Vectorbt
+
+def plot_pf(pf):
+    plt.figure(figsize=(12,2))
+    plt.subplot(121)
+    pf.asset_value.plot(title='asset_value')
+    plt.subplot(122)
+    (pf.value - pf.init_value).plot(title='cum pnl')
+
+def df_from_pf(pf):
+    showcols = ['close', 'asset_value', 'asset_flow', 'position', 'returns', 'cumulative_returns']
+    showsers = []
+    for x in showcols:
+        ser = getattr(pf, x)
+        ser.name = x
+        showsers.append(ser)
+    df = pd.concat(showsers, axis=1)
+    return df
+
+#def get_df_vbt(dfo, pr, p=1, q=2, r=0, maxlat=1e9):
+#    dfv = dfo[['mid', 'pred']].apply(lambda x: pd.Series(pr.buy_sell_prc(x.mid, x.pred, p, q, r), index=['buyprc', 'sellprc']), axis=1)
+#    dfv['price'] = dfo.mid
+#    dfv.loc[dfo.tlat > maxlat, 'buyprc'] = 1e-9 # no shift needed for tlat
+#    dfv.loc[dfo.tlat > maxlat, 'sellprc'] = 1e9
+#    dfv['longentry'] = dfv.buyprc.shift() > dfv.price
+#    dfv['shortentry'] = dfv.sellprc.shift() < dfv.price
+#    long_slippage = (dfv.price - dfv.buyprc.shift()).abs()
+#    shoft_slippage = (dfv.price - dfv.sellprc.shift()).abs()
+#    dfv['slippage'] = 0
+#    dfv.loc[dfv.longentry, 'slippage'] = long_slippage
+#    dfv.loc[dfv.shortentry, 'slippage'] = shoft_slippage
+#    dfv.slippage /= dfv.price
+#    return dfv
+
+def get_df_vbt_v2(dfo, serstd, p=1, q=2, r=0, maxlat=1e9):
+    serprice = dfo.mid
+    buyprc = dfo.mid * (1 - (q + r) * serstd + p * dfo.pred)
+    sellprc = dfo.mid * (1 + (q + r) * serstd + p * dfo.pred)
+    buyprc[dfo.tlat > maxlat] = 1e-9;
+    sellprc[dfo.tlat > maxlat] = 1e9;
+    longentry = buyprc.shift() > serprice
+    shortentry = sellprc.shift() < serprice
+    longslippage = (serprice - buyprc.shift()).abs()
+    shortslippage = (serprice - sellprc.shift()).abs()
+    slippage = pd.Series(0, index=serprice.index)
+    slippage[longentry] = longslippage[longentry]
+    slippage[shortentry] = shortslippage[shortentry]
+    slippage /= serprice
+
+    dfv = pd.DataFrame({'price': serprice,
+        'buyprc': buyprc,
+        'sellprc': sellprc,
+        'longentry': longentry,
+        'shortentry': shortentry,
+        'slippage': slippage})
+    return dfv
+
+import vectorbtpro as vbt
+from vectorbtpro import *
+@njit
+def signal_func_mm(c, prc, buyprc, sellprc):
+    #posthres = (maxpos[c.i] - .5) / prc[c.i]
+    posthres = (1 - .5) / prc[c.i]
+    pos = c.last_position[0]
+    long_entry = buyprc[c.i] > prc[c.i] and pos < posthres
+    short_entry = sellprc[c.i] < prc[c.i] and pos > -posthres
+    long_exit = pos > 0 and pos < posthres
+    short_exit = pos < 0 and pos > -posthres
+    return long_entry, long_exit, short_entry, short_exit
+
+#def get_mm_pnl_vbt(dfo, target_name, feebp=-0.5, p=1, q=2, r=0, pr=None, maxlat=1e9):
+#    '''
+#    Calculates pnl by calling from_signals function of vectorbt.
+#
+#    Negative fee means rebate.
+#    '''
+#    fee = feebp * 1e-4
+#    if pr is None:
+#        pr = PredRange(dfo, target_name)
+#
+#    dfv = get_df_vbt(dfo, pr, p, q, r, maxlat)
+#    pf = vbt.Portfolio.from_signals(dfv.price, fees=fee, slippage=dfv.slippage,
+#        signal_func_nb=signal_func_mm, signal_args=(
+#            dfv.price.values,
+#            dfv.buyprc.shift().values,
+#            dfv.sellprc.shift().values),
+#        accumulate=True, init_cash=1, size=1, size_type='value')
+#
+#    pnl = (pf.value - pf.init_value).diff().fillna(0)
+#    pos = pf.asset_value
+#    pnl.name = (q, 'pnl')
+#    pos.name = (q, 'pos')
+#    return pnl, pos
+#
+#def get_mm_pnls_vbt(dfo, target_name, q_list, pr, maxlat):
+#    cols = []
+#    for q in q_list:
+#        pnl, pos = get_mm_pnl_vbt(dfo, target_name, q=q, pr=pr, maxlat=maxlat)
+#        cols.append(pnl)
+#        cols.append(pos)
+#    df = pd.concat(cols, axis=1)
+#    return df
+
+def get_mm_pnl_vbt_v2(dfo, target_name, serstd, feebp=-0.5, p=1, q=2, r=0, maxpos=1, maxlat=1e9):
+    '''
+    Calculates pnl by calling from_signals function of vectorbt.
+
+    Take serstd from the caller.
+
+    Negative fee means rebate.
+    '''
+    fee = feebp * 1e-4
+    dfv = get_df_vbt_v2(dfo, serstd, p, q, r, maxlat)
+
+    pf = vbt.Portfolio.from_signals(dfv.price, fees=fee, slippage=dfv.slippage,
+        signal_func_nb=signal_func_mm, signal_args=(
+            dfv.price.values,
+            dfv.buyprc.shift().values,
+            dfv.sellprc.shift().values,
+            ),
+        accumulate=True, init_cash=maxpos, size=1, size_type='value')
+
+    pnl = (pf.value - pf.init_value).diff().fillna(0)
+    pos = pf.asset_value
+    dfmm = pd.DataFrame({'pnl': pnl, 'pos': pos})
+    dfmm.columns = pd.MultiIndex.from_product([[q], dfmm.columns], names=['q', ''])
+    return dfmm
+
+def get_mm_pnls_vbt_v2(dfo, target_name, q_list, feebp=-0.5, maxpos=None, pr=None, serstd=None, maxlat=1e9):
+    if serstd is None:
+        if pr is None:
+            pr = PredRange(dfo, target_name)
+        serstd = dfo.pred.apply(lambda x: pr.get_std(x))
+    cols = []
+    for q in q_list:
+        dfmm = get_mm_pnl_vbt_v2(dfo, target_name, serstd, feebp=feebp, q=q, maxpos=maxpos, maxlat=maxlat)
+        cols.append(dfmm)
+    df = pd.concat(cols, axis=1)
+    return df
