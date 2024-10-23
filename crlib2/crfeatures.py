@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from math import log2
 
+from .crdataio import *
+
 def future_returns(prc, ri):
     r = None
     if prc is not None and len(prc) > ri:
@@ -303,3 +305,88 @@ def make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex=Non
     df = pd.concat([df] + serlst, axis=1)
     return df
 
+def get_reg_features_3h(dt1, par, min_timex=None, max_timex=None):
+    '''
+    Calculate the features in a three hour period, then truncate to oen hour period.
+    '''
+    index_col = par['index_col'] if 'index_col' in par else None
+    mid_col = par['mid_col'] if 'mid_col' in par else None
+    sample_timex = par['sample_timex'] if 'sample_timex' in par else par['grid_timex'] if 'grid_timex' in par else None
+
+    dft = read_3h('trade', dt1, par)
+    dfb = read_3h('bbo', dt1, par)
+    dfm = read_3h('midpx', dt1, par)
+    if dft is None or dfb is None or dfm is None:
+        return None
+    df = make_features(dft, dfb, dfm, sample_timex, mid_col, index_col, min_timex, max_timex)
+    return df
+
+def get_tevt_features_3h(dt, par, min_timex=None, max_timex=None, min_row=100):
+    '''
+    Calculate the features in a three hour period, then truncate to oen hour period.
+    '''
+    if min_timex is None:
+        min_timex = par['min_feature_timex'] - par['grid_timex']
+    dff = get_reg_features_3h(dt, par, min_timex, max_timex)
+
+    dft = read_3h('trade', dt, par)
+    if dft is None or len(dft) < min_row:
+        return None
+
+    # Time weighted moving average
+    min_twma_timex = 10
+    max_twma_timex = 30
+    timex_list = np.array(range(min_twma_timex, max_twma_timex))
+    dfma = pd.DataFrame(columns=[f'twma_{x}' for x in timex_list], index=dft.index)
+    dfma.iloc[0] = dft.price[0]
+    timeconsts = np.array([2.0**x for x in timex_list])
+    timediff = dft.t0.diff().fillna(0)
+    prc = dft.price
+
+    # Price MA
+    for i in range(1, len(dft)):
+        dfma.iloc[i] = dfma.iloc[i-1] + np.minimum(timeconsts, timediff.iloc[i]) / timeconsts * (prc[i] - dfma.iloc[i-1])
+
+    # twret
+    twret = pd.DataFrame((dft.price.to_numpy().reshape(-1,1) / dfma.to_numpy() - 1),
+                    index=dft.index, columns=[f'twret_{x}' for x in timex_list]).fillna(0)
+    del dfma
+    dft = pd.concat([dft, twret], axis=1)
+
+    # Determine samples and drop non-sample trades
+    dft['sample'] = False
+    dft = dft.loc[~dft.index.duplicated(keep='first')]
+    last_sample = 0
+    for idx, row in dft.iterrows():
+        if row.t0 > last_sample + 5000:
+            dft.loc[idx, 'sample'] = True
+            last_sample = row.t0
+    dft = dft[dft['sample']]
+
+    # Merge grid and trade, ffill, then select samples only
+    dfmer = pd.merge(dff, dft, how='outer', left_index=True, right_index=True, suffixes=('', '_trd'))
+    dfmer[dff.columns] = dfmer[dff.columns].ffill()
+    dfmer = dfmer[(dfmer['valid'].shift() == True)&(dfmer['sample'] == True)]
+
+    # Recalculate ret
+    retnames = [x for x in dfmer.columns if x.startswith('ret_')]
+    retidxlist = [int(x[-2:]) for x in retnames if len(x) == 6 and x[3] == '_']
+    for name in retnames:
+        dfmer[name] *= dfmer.price_trd / dfmer.price
+        dfmer[name] += dfmer.price_trd / dfmer.price - 1
+
+    # Recalculate tar
+    tarnames = [x for x in dfmer.columns if x.startswith('tar_')]
+    for name in tarnames:
+        dfmer[name] *= dfmer.price / dfmer.price_trd
+        dfmer[name] += dfmer.price / dfmer.price_trd - 1
+
+    return dfmer
+
+def get_features_3h(dt, par, min_timex=None, max_timex=None):
+    df = None
+    if 'sample_type' in par and par['sample_type'] == 'tevt':
+        df = get_tevt_features_3h(dt, par)
+    else:
+        df = get_reg_features_3h(dt, par)
+    return df
