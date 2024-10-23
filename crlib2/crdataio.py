@@ -34,7 +34,7 @@ def get_data_dir(dt, locale):
         os.makedirs(data_dir)
     return data_dir
 
-def read_data(datatype, dt, locale, index_col='t0', columns=None, product=None):
+def read_data(datatype, dt, locale, index_col='t0', columns=None, product=None, min_row=100):
     '''
     Reads the tick data of the specified datatype for the time dt.
     '''
@@ -49,6 +49,9 @@ def read_data(datatype, dt, locale, index_col='t0', columns=None, product=None):
     readcols = None if columns is None else product_cols + columns
     df = pd.read_parquet(path, columns=readcols)
 
+    if df is None or len(df) < min_row:
+        return None
+
     if product is None:
         df['date'] = pd.to_datetime(df[index_col], unit='us')
         df = df.set_index(product_cols)
@@ -56,7 +59,6 @@ def read_data(datatype, dt, locale, index_col='t0', columns=None, product=None):
         df = df[(df.exchange==product[0]) & (df.symbol==product[1])]
 
         if index_col is None or df[index_col].sum() == 0:
-            print(f'Datatype={datatype}: {index_col} is not available. Using t0.')
             index_col = 't0'
 
         df['date'] = pd.to_datetime(df[index_col], unit='us')
