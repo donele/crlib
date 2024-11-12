@@ -818,22 +818,7 @@ def df_from_pf(pf):
     df = pd.concat(showsers, axis=1)
     return df
 
-#def get_df_vbt(dfo, pr, p=1, q=2, r=0, maxlat=1e9):
-#    dfv = dfo[['mid', 'pred']].apply(lambda x: pd.Series(pr.buy_sell_prc(x.mid, x.pred, p, q, r), index=['buyprc', 'sellprc']), axis=1)
-#    dfv['price'] = dfo.mid
-#    dfv.loc[dfo.tlat > maxlat, 'buyprc'] = 1e-9 # no shift needed for tlat
-#    dfv.loc[dfo.tlat > maxlat, 'sellprc'] = 1e9
-#    dfv['longentry'] = dfv.buyprc.shift() > dfv.price
-#    dfv['shortentry'] = dfv.sellprc.shift() < dfv.price
-#    long_slippage = (dfv.price - dfv.buyprc.shift()).abs()
-#    shoft_slippage = (dfv.price - dfv.sellprc.shift()).abs()
-#    dfv['slippage'] = 0
-#    dfv.loc[dfv.longentry, 'slippage'] = long_slippage
-#    dfv.loc[dfv.shortentry, 'slippage'] = shoft_slippage
-#    dfv.slippage /= dfv.price
-#    return dfv
-
-def get_df_vbt_v2(dfo, serstd, p=1, q=2, r=0, maxlat=1e9):
+def get_df_vbt(dfo, serstd, p=1, q=2, r=0, maxlat=1e9):
     serprice = dfo.mid
     buyprc = dfo.mid * (1 - (q + r) * serstd + p * dfo.pred)
     sellprc = dfo.mid * (1 + (q + r) * serstd + p * dfo.pred)
@@ -869,40 +854,7 @@ def signal_func_mm(c, prc, buyprc, sellprc):
     short_exit = pos < 0 and pos > -posthres
     return long_entry, long_exit, short_entry, short_exit
 
-#def get_mm_pnl_vbt(dfo, target_name, feebp=-0.5, p=1, q=2, r=0, pr=None, maxlat=1e9):
-#    '''
-#    Calculates pnl by calling from_signals function of vectorbt.
-#
-#    Negative fee means rebate.
-#    '''
-#    fee = feebp * 1e-4
-#    if pr is None:
-#        pr = PredRange(dfo, target_name)
-#
-#    dfv = get_df_vbt(dfo, pr, p, q, r, maxlat)
-#    pf = vbt.Portfolio.from_signals(dfv.price, fees=fee, slippage=dfv.slippage,
-#        signal_func_nb=signal_func_mm, signal_args=(
-#            dfv.price.values,
-#            dfv.buyprc.shift().values,
-#            dfv.sellprc.shift().values),
-#        accumulate=True, init_cash=1, size=1, size_type='value')
-#
-#    pnl = (pf.value - pf.init_value).diff().fillna(0)
-#    pos = pf.asset_value
-#    pnl.name = (q, 'pnl')
-#    pos.name = (q, 'pos')
-#    return pnl, pos
-#
-#def get_mm_pnls_vbt(dfo, target_name, q_list, pr, maxlat):
-#    cols = []
-#    for q in q_list:
-#        pnl, pos = get_mm_pnl_vbt(dfo, target_name, q=q, pr=pr, maxlat=maxlat)
-#        cols.append(pnl)
-#        cols.append(pos)
-#    df = pd.concat(cols, axis=1)
-#    return df
-
-def get_mm_pnl_vbt_v2(dfo, target_name, serstd, feebp=-0.5, p=1, q=2, r=0, maxpos=1, maxlat=1e9):
+def get_mm_pnl_vbt(dfo, target_name, serstd, feebp=-0.5, p=1, q=2, r=0, maxpos=1, maxlat=1e9):
     '''
     Calculates pnl by calling from_signals function of vectorbt.
 
@@ -911,7 +863,7 @@ def get_mm_pnl_vbt_v2(dfo, target_name, serstd, feebp=-0.5, p=1, q=2, r=0, maxpo
     Negative fee means rebate.
     '''
     fee = feebp * 1e-4
-    dfv = get_df_vbt_v2(dfo, serstd, p, q, r, maxlat)
+    dfv = get_df_vbt(dfo, serstd, p, q, r, maxlat)
 
     pf = vbt.Portfolio.from_signals(dfv.price, fees=fee, slippage=dfv.slippage,
         signal_func_nb=signal_func_mm, signal_args=(
@@ -927,14 +879,14 @@ def get_mm_pnl_vbt_v2(dfo, target_name, serstd, feebp=-0.5, p=1, q=2, r=0, maxpo
     dfmm.columns = pd.MultiIndex.from_product([[q], dfmm.columns], names=['q', ''])
     return dfmm
 
-def get_mm_pnls_vbt_v2(dfo, target_name, q_list, feebp=-0.5, maxpos=None, pr=None, serstd=None, maxlat=1e9):
+def get_mm_pnls_vbt(dfo, target_name, q_list, feebp=-0.5, maxpos=None, pr=None, serstd=None, maxlat=1e9):
     if serstd is None:
         if pr is None:
             pr = PredRange(dfo, target_name)
         serstd = dfo.pred.apply(lambda x: pr.get_std(x))
     cols = []
     for q in q_list:
-        dfmm = get_mm_pnl_vbt_v2(dfo, target_name, serstd, feebp=feebp, q=q, maxpos=maxpos, maxlat=maxlat)
+        dfmm = get_mm_pnl_vbt(dfo, target_name, serstd, feebp=feebp, q=q, maxpos=maxpos, maxlat=maxlat)
         cols.append(dfmm)
     df = pd.concat(cols, axis=1)
     return df
